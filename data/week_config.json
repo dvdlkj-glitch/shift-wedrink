@@ -1,0 +1,52 @@
+{
+  "week_start": "2026-07-06",
+  "week_end": "2026-07-12",
+  "timezone": "Asia/Kuching",
+  "region": "Kota Kinabalu, Sabah, West/East Malaysia",
+  "locations": ["Aeropod", "Lintas", "Beverly"],
+  "full_shifts": {
+    "Morning": {"start": "10:00", "end": "19:00", "hours": 9},
+    "Mid":     {"start": "13:00", "end": "22:00", "hours": 9},
+    "Night":   {"start": "15:00", "end": "00:00", "hours": 9}
+  },
+  "part_shifts": {
+    "Morning": {"start": "10:00", "end": "14:00", "hours": 4},
+    "Mid":     {"start": "16:00", "end": "20:00", "hours": 4},
+    "Night":   {"start": "19:00", "end": "23:00", "hours": 4}
+  },
+  "coverage": {
+    "full_required": {"Morning": 1, "Mid": 0, "Night": 1},
+    "part_optional": true
+  },
+  "off_days": {
+    "2026-07-06": ["Alya", "Nier"],
+    "2026-07-07": ["Alya", "Kelvin"],
+    "2026-07-08": ["Aggie", "Eva"],
+    "2026-07-09": ["Murni", "Yya"],
+    "2026-07-10": ["Wanna"]
+  },
+  "no_off_members": ["Lela", "Azz"],
+  "shift_requests": [
+    {"name": "Murni", "date": "2026-07-10", "shift": "Night", "hard": true, "note": "Requested night shift"},
+    {"name": "Nier",  "date": "2026-07-10", "shift": "Night", "hard": true, "note": "Requested night shift"},
+    {"name": "Nier",  "date": "2026-07-12", "shift": "Night", "hard": true, "note": "Requested night shift"},
+    {"name": "Lela",  "date": "2026-07-12", "shift": "Morning", "hard": true, "note": "Requested morning shift"},
+    {"name": "Azz",   "date": "2026-07-06", "shift": "Night", "hard": true, "note": "Requested night shift"},
+    {"name": "Aggie", "date": null, "shift": "Morning", "hard": false, "note": "Prefers morning shift (try request)"}
+  ],
+  "part_availability": {
+    "Qiara": {
+      "2026-07-06": "anytime", "2026-07-07": "anytime", "2026-07-08": "unavailable",
+      "2026-07-09": "anytime", "2026-07-10": "anytime", "2026-07-11": "anytime", "2026-07-12": "anytime"
+    },
+    "MeiMei": {
+      "2026-07-06": "unavailable", "2026-07-07": "unavailable", "2026-07-08": "no_morning",
+      "2026-07-09": "morning_only", "2026-07-10": "morning_only", "2026-07-11": "morning_only", "2026-07-12": "morning_only"
+    },
+    "Aaron": {
+      "2026-07-06": "evening_only", "2026-07-07": "evening_only", "2026-07-08": "evening_only",
+      "2026-07-09": "evening_only", "2026-07-10": "unavailable", "2026-07-11": "anytime", "2026-07-12": "anytime"
+    }
+  },
+  "friday_conditional": "2026-07-10"
+}
