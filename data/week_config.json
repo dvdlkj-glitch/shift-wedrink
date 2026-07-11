@@ -1,6 +1,6 @@
 {
-  "week_start": "2026-07-06",
-  "week_end": "2026-07-12",
+  "week_start": "2026-07-13",
+  "week_end": "2026-07-19",
   "timezone": "Asia/Kuching",
   "region": "Kota Kinabalu, Sabah, West/East Malaysia",
   "locations": ["Aeropod", "Lintas", "Beverly"],
@@ -19,33 +19,36 @@
     "part_optional": true
   },
   "off_days": {
-    "2026-07-06": ["Alya", "Nier"],
-    "2026-07-07": ["Alya", "Kelvin"],
-    "2026-07-08": ["Eva"],
-    "2026-07-09": ["Murni", "Yya"],
-    "2026-07-10": ["Wanna"]
+    "2026-07-13": ["Wanna", "Alya"],
+    "2026-07-14": ["Aggie", "Kelvin"],
+    "2026-07-15": ["Eva"],
+    "2026-07-16": ["Murni"]
   },
-  "no_off_members": ["Layla", "Azz"],
+  "no_off_members": ["Yya", "Azz", "Layla"],
   "shift_requests": [
-    {"name": "Murni", "date": "2026-07-10", "shift": "Night", "hard": true, "note": "Requested night shift"},
-    {"name": "Nier",  "date": "2026-07-10", "shift": "Night", "hard": true, "note": "Requested night shift"},
-    {"name": "Nier",  "date": "2026-07-12", "shift": "Night", "hard": true, "note": "Requested night shift"},
-    {"name": "Layla", "date": "2026-07-12", "shift": "Morning", "hard": true, "note": "Requested morning shift"},
-    {"name": "Azz",   "date": "2026-07-06", "shift": "Night", "hard": true, "note": "Requested night shift"}
+    {"name": "Nier",  "date": "2026-07-13", "shift": "Night",   "hard": true, "note": "Requested night"},
+    {"name": "Eva",   "date": "2026-07-13", "shift": "Morning", "hard": true, "note": "Requested morning"},
+    {"name": "Alya",  "date": "2026-07-14", "shift": "Night",   "hard": true, "note": "Requested night"},
+    {"name": "Murni", "date": "2026-07-15", "shift": "Morning", "hard": true, "note": "Requested morning"},
+    {"name": "Azz",   "date": "2026-07-17", "shift": "Morning", "hard": true, "note": "Requested morning"},
+    {"name": "Nier",  "date": "2026-07-17", "shift": "Night",   "hard": true, "note": "Requested night"},
+    {"name": "Eva",   "date": "2026-07-18", "shift": "Morning", "hard": true, "note": "Requested morning"},
+    {"name": "Yya",   "date": "2026-07-19", "shift": "Morning", "hard": true, "note": "Requested morning"},
+    {"name": "Layla", "date": "2026-07-19", "shift": "Morning", "hard": true, "note": "Requested morning"}
   ],
   "part_availability": {
     "Qiara": {
-      "2026-07-06": "anytime", "2026-07-07": "anytime", "2026-07-08": "unavailable",
-      "2026-07-09": "anytime", "2026-07-10": "anytime", "2026-07-11": "anytime", "2026-07-12": "anytime"
+      "2026-07-13": "anytime", "2026-07-14": "anytime", "2026-07-15": "anytime",
+      "2026-07-16": "anytime", "2026-07-17": "anytime", "2026-07-18": "anytime", "2026-07-19": "anytime"
     },
     "MeiMei": {
-      "2026-07-06": "unavailable", "2026-07-07": "unavailable", "2026-07-08": "no_morning",
-      "2026-07-09": "morning_only", "2026-07-10": "morning_only", "2026-07-11": "morning_only", "2026-07-12": "morning_only"
+      "2026-07-13": "morning_only", "2026-07-14": "unavailable", "2026-07-15": "no_morning",
+      "2026-07-16": "no_morning", "2026-07-17": "no_morning", "2026-07-18": "no_morning", "2026-07-19": "no_morning"
     },
     "Aaron": {
-      "2026-07-06": "evening_only", "2026-07-07": "evening_only", "2026-07-08": "evening_only",
-      "2026-07-09": "evening_only", "2026-07-10": "unavailable", "2026-07-11": "anytime", "2026-07-12": "anytime"
+      "2026-07-13": "evening_only", "2026-07-14": "evening_only", "2026-07-15": "evening_only",
+      "2026-07-16": "evening_only", "2026-07-17": "evening_only", "2026-07-18": "anytime", "2026-07-19": "anytime"
     }
   },
-  "friday_conditional": "2026-07-10"
+  "friday_conditional": "2026-07-17"
 }
