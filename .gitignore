@@ -3,3 +3,6 @@ __pycache__/
 .venv/
 .DS_Store
 .~lock.*#
+# Never commit secrets (Supabase keys etc.)
+.streamlit/secrets.toml
+secrets.toml

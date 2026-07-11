@@ -18,6 +18,7 @@ from urllib.parse import quote
 from datetime import datetime, timedelta, time
 
 import pandas as pd
+import requests
 import streamlit as st
 import streamlit.components.v1 as components
 
@@ -333,6 +334,109 @@ def geo_show_html():
 """
 
 
+# ===================== SUPABASE CHECK-IN STORE =====================
+# Durable check-in storage. When st.secrets has a [supabase] url+key, check-ins
+# are written to / read from the Postgres `check_ins` table (survives redeploys).
+# Without secrets the app falls back to the ephemeral schedule.csv (local dev).
+def _sb():
+    try:
+        s = st.secrets.get("supabase", {})
+        u, k = s.get("url"), s.get("key")
+        if u and k:
+            return u.rstrip("/"), k
+    except Exception:
+        pass
+    return None, None
+
+
+def db_enabled():
+    return _sb()[0] is not None
+
+
+def _sb_headers(key):
+    return {"apikey": key, "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json"}
+
+
+def db_upsert_checkin(rec):
+    """Insert/update one check-in (idempotent on work_date+employee+shift).
+    Returns (ok, error)."""
+    url, key = _sb()
+    if not url:
+        return False, "Supabase not configured"
+    try:
+        h = _sb_headers(key)
+        h["Prefer"] = "resolution=merge-duplicates,return=minimal"
+        resp = requests.post(f"{url}/rest/v1/check_ins", headers=h,
+                             json=[rec], timeout=12)
+        if resp.status_code in (200, 201, 204):
+            db_fetch_checkins.clear()
+            return True, None
+        return False, f"{resp.status_code}: {resp.text[:180]}"
+    except Exception as e:
+        return False, str(e)
+
+
+@st.cache_data(ttl=10, show_spinner=False)
+def db_fetch_checkins(dates_tuple):
+    """Check-ins for the given ISO dates (cached ~10s). Returns list of dicts."""
+    url, key = _sb()
+    if not url or not dates_tuple:
+        return []
+    try:
+        inlist = ",".join(dates_tuple)
+        resp = requests.get(f"{url}/rest/v1/check_ins", headers=_sb_headers(key),
+                            params={"select": "*", "work_date": f"in.({inlist})"},
+                            timeout=12)
+        if resp.status_code == 200:
+            return resp.json()
+    except Exception:
+        pass
+    return []
+
+
+def overlay_checkins(df):
+    """Return a copy of df with clock_in/ci_* filled from the durable store.
+    No-op when Supabase isn't configured (CSV values are used as-is)."""
+    if df.empty or not db_enabled():
+        return df
+    dates = tuple(sorted(set(df["date"].astype(str))))
+    rows = db_fetch_checkins(dates)
+    idx = {(r["employee"], str(r["work_date"]), r["shift"]): r for r in rows}
+    out = df.copy()
+    for i, r in out.iterrows():
+        c = idx.get((r["employee"], str(r["date"]), r["shift"]))
+        if c:
+            out.at[i, "clock_in"] = c.get("clock_in", "") or ""
+            out.at[i, "ci_lat"] = "" if c.get("lat") is None else str(c["lat"])
+            out.at[i, "ci_lng"] = "" if c.get("lng") is None else str(c["lng"])
+            out.at[i, "ci_acc"] = "" if c.get("accuracy_m") is None else str(round(c["accuracy_m"]))
+            out.at[i, "ci_dist"] = "" if c.get("distance_m") is None else str(round(c["distance_m"]))
+            out.at[i, "ci_method"] = "gps"
+        else:
+            out.at[i, "clock_in"] = ""  # DB is source of truth; ignore ephemeral CSV
+    return out
+
+
+def _checkin_record(r, stamp, lat, lng, acc, dist, late):
+    return {"work_date": r["date"], "employee": r["employee"], "branch": r["location"],
+            "shift": r["shift"], "shift_start": r["start"], "clock_in": stamp,
+            "lat": None if lat is None else round(lat, 6),
+            "lng": None if lng is None else round(lng, 6),
+            "accuracy_m": None if acc is None else round(acc),
+            "distance_m": None if dist is None else round(dist),
+            "minutes_late": int(late)}
+
+
+def _manual_record(r, clock_in_str):
+    """Check-in record for an admin manual clock-in (no GPS)."""
+    lm = late_minutes(clock_in_str, r["start"]) or 0
+    return {"work_date": r["date"], "employee": r["employee"], "branch": r["location"],
+            "shift": r["shift"], "shift_start": r["start"], "clock_in": clock_in_str,
+            "lat": None, "lng": None, "accuracy_m": None, "distance_m": None,
+            "minutes_late": int(lm)}
+
+
 def do_checkin(emp, lat, lng, acc):
     """Validate a GPS check-in against today's shift + branch geofence, and
     stamp clock_in on success. Returns a result dict for the banner."""
@@ -344,6 +448,7 @@ def do_checkin(emp, lat, lng, acc):
     if todays.empty:
         return {"ok": False, "msg": f"No shift scheduled for {emp} today ({today}). "
                                     "Nothing to check in to — please check with your admin."}
+    todays = overlay_checkins(todays)  # reflect durable (Supabase) check-ins
     target, status, open_m = pick_checkin_target(todays, now_min, early_min())
     if status == "done":
         first = todays.iloc[0]
@@ -372,14 +477,20 @@ def do_checkin(emp, lat, lng, acc):
                                     f"(must be within {round(radius)} m). Move closer and retry."}
     stamp = now.strftime("%Y-%m-%d %H:%M")
     late = max(0, now_min - (_min_of_day(r["start"]) or now_min))
-    df.at[target_idx, "clock_in"] = stamp
-    df.at[target_idx, "ci_lat"] = str(round(lat, 6))
-    df.at[target_idx, "ci_lng"] = str(round(lng, 6))
-    df.at[target_idx, "ci_acc"] = str(round(acc))
-    df.at[target_idx, "ci_dist"] = str(round(dist))
-    df.at[target_idx, "ci_method"] = "gps"
-    st.session_state.schedule = df[SCHED_COLS]
-    save_schedule(st.session_state.schedule)
+    if db_enabled():
+        ok, err = db_upsert_checkin(_checkin_record(r, stamp, lat, lng, acc, dist, late))
+        if not ok:
+            return {"ok": False, "msg": "Couldn't save your check-in — please try again "
+                                        f"in a moment. ({err})"}
+    else:
+        df.at[target_idx, "clock_in"] = stamp
+        df.at[target_idx, "ci_lat"] = str(round(lat, 6))
+        df.at[target_idx, "ci_lng"] = str(round(lng, 6))
+        df.at[target_idx, "ci_acc"] = str(round(acc))
+        df.at[target_idx, "ci_dist"] = str(round(dist))
+        df.at[target_idx, "ci_method"] = "gps"
+        st.session_state.schedule = df[SCHED_COLS]
+        save_schedule(st.session_state.schedule)
     late_txt = f"⏰ {late} min late" if late > 0 else "✅ on time"
     return {"ok": True, "msg": f"✓ {emp} checked in at {stamp} · {loc_label(branch)} · "
                                f"{SHIFT_ICON.get(r['shift'], '')} {r['shift']} shift · {late_txt} · "
@@ -784,6 +895,7 @@ def render_checkin_ui():
         st.warning(f"No shift scheduled for **{who}** today. "
                    "If that's wrong, please ask your admin to add it.")
         return
+    todays = overlay_checkins(todays)  # reflect durable (Supabase) check-ins
 
     # Show today's shift(s) and their check-in status.
     for _, r in todays.iterrows():
@@ -1312,13 +1424,16 @@ def render_admin():
     with tab_clock:
         st.subheader("Clock In / Out")
         st.caption("Stamp current Sabah time with one click, or type it. Format: YYYY-MM-DD HH:MM")
+        st.caption("🟢 Supabase — check-ins saved to the cloud database (survive redeploys)."
+                   if db_enabled() else
+                   "⚪ Local CSV — check-ins are temporary until Supabase secrets are added.")
         sched = st.session_state.schedule
         if sched.empty:
             st.info("Generate a schedule first.")
         else:
             d_sel = st.selectbox("Day", [d.isoformat() for d in DATES],
                                  format_func=lambda x: datetime.strptime(x, "%Y-%m-%d").strftime("%a %d %b"))
-            day_rows = sched[sched.date == d_sel]
+            day_rows = overlay_checkins(sched[sched.date == d_sel])
             if day_rows.empty:
                 st.info("No shifts on this day.")
             st.caption("📍 = staff GPS self-check-in (distance from branch centre shown) · "
@@ -1337,19 +1452,34 @@ def render_admin():
                                         label_visibility="collapsed", placeholder="clock in")
                 co = cols[2].text_input("Clock out", value=r["clock_out"], key=f"co_{idx}",
                                         label_visibility="collapsed", placeholder="clock out")
-                st.session_state.schedule.at[idx, "clock_in"] = ci
-                st.session_state.schedule.at[idx, "clock_out"] = co
+                if not db_enabled():
+                    st.session_state.schedule.at[idx, "clock_in"] = ci
+                    st.session_state.schedule.at[idx, "clock_out"] = co
                 if cols[3].button("🟢 In now", key=f"cin_{idx}"):
-                    st.session_state.schedule.at[idx, "clock_in"] = now_myt().strftime("%Y-%m-%d %H:%M")
-                    save_schedule(st.session_state.schedule)
+                    stamp = now_myt().strftime("%Y-%m-%d %H:%M")
+                    if db_enabled():
+                        ok, err = db_upsert_checkin(_manual_record(r, stamp))
+                        st.toast("Saved" if ok else f"Save failed: {err}")
+                    else:
+                        st.session_state.schedule.at[idx, "clock_in"] = stamp
+                        save_schedule(st.session_state.schedule)
                     st.rerun()
                 if cols[4].button("🔴 Out now", key=f"cout_{idx}"):
                     st.session_state.schedule.at[idx, "clock_out"] = now_myt().strftime("%Y-%m-%d %H:%M")
                     save_schedule(st.session_state.schedule)
                     st.rerun()
             if st.button("💾 Save clock records", type="primary"):
-                save_schedule(st.session_state.schedule)
-                st.success("Clock records saved.")
+                if db_enabled():
+                    saved = 0
+                    for idx, r in day_rows.iterrows():
+                        val = st.session_state.get(f"ci_{idx}", "").strip()
+                        if val:
+                            ok, _ = db_upsert_checkin(_manual_record(r, val))
+                            saved += 1 if ok else 0
+                    st.success(f"Saved {saved} check-in(s) to Supabase.")
+                else:
+                    save_schedule(st.session_state.schedule)
+                    st.success("Clock records saved.")
 
     with tab_perf:
         st.subheader("Employee Performance")
@@ -1357,7 +1487,7 @@ def render_admin():
         if sched.empty:
             st.info("Generate a schedule first.")
         else:
-            df = sched.copy()
+            df = overlay_checkins(sched)
             df["hours"] = pd.to_numeric(df["hours"], errors="coerce").fillna(0)
             df["actual"] = df.apply(lambda r: actual_hours(r["clock_in"], r["clock_out"]), axis=1)
             rows = []
@@ -1412,6 +1542,15 @@ def render_admin():
                 ["name", "date", "shift", "hard", "note"]])
         st.markdown("##### 🕒 Part-time availability")
         st.table(pd.DataFrame(config.get("part_availability", {})).T)
+        st.markdown("##### 🗄️ Check-in storage")
+        if db_enabled():
+            st.success("🟢 **Supabase connected** — staff check-ins are saved to the cloud "
+                       "database and persist across redeploys.")
+        else:
+            st.warning("⚪ **Local CSV (temporary).** Check-ins won't survive a redeploy until "
+                       "the Supabase secrets are added. On Streamlit Cloud: **Manage app ▸ "
+                       "Settings ▸ Secrets**, paste the `[supabase]` url + key, and reboot.")
+
         st.markdown("##### ⏳ Check-in time window")
         stt = load_settings()
         wc1, wc2 = st.columns([2, 1])
