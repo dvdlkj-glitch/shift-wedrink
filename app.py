@@ -480,10 +480,18 @@ def checkin_map_html(checkins, sites, height=380):
     tmpl = """<!DOCTYPE html><html><head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
-<style>html,body,#m{height:100%;margin:0}#m{border-radius:14px;background:#0c1a20}
+<style>html,body,#m{height:100%;margin:0}body{position:relative}#m{border-radius:14px;background:#0c1a20}
 .lbl{background:rgba(20,26,33,.92);border:1px solid #37D7D0;color:#EAF3F1;font:600 11px system-ui;padding:1px 6px;border-radius:6px;white-space:nowrap}
-.blbl{background:rgba(12,26,32,.85);border:1px solid rgba(80,190,180,.5);color:#9fe6e0;font:700 11px system-ui;padding:2px 8px;border-radius:8px}</style>
-</head><body><div id="m"></div><script>
+.blbl{background:rgba(12,26,32,.85);border:1px solid rgba(80,190,180,.5);color:#9fe6e0;font:700 11px system-ui;padding:2px 8px;border-radius:8px}
+#lg{position:absolute;left:10px;bottom:12px;z-index:1000;background:rgba(12,26,32,.92);border:1px solid rgba(80,190,180,.4);border-radius:10px;padding:8px 11px;font:600 11.5px system-ui;color:#EAF3F1;line-height:1.75;pointer-events:none;box-shadow:0 6px 18px rgba(0,0,0,.4)}
+#lg i{display:inline-block;width:11px;height:11px;border-radius:50%;margin-right:7px;vertical-align:middle}</style>
+</head><body><div id="m"></div>
+<div id="lg">
+  <div><i style="background:#2ec878"></i>On time</div>
+  <div><i style="background:#F2A03D"></i>Late</div>
+  <div><i style="background:transparent;border:2px solid #37D7D0"></i>Branch · 80&nbsp;m</div>
+</div>
+<script>
 var D=__DATA__;
 var map=L.map('m',{scrollWheelZoom:false});
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'}).addTo(map);
@@ -1024,6 +1032,16 @@ def render_checkin_ui():
                "(phone browser will ask for location permission).")
 
 
+@st.fragment(run_every=20)
+def render_checkin_map():
+    """On-duty check-in map — reruns itself every 20s so late arrivals pop in."""
+    cks = todays_checkins()
+    n = len({(c["employee"], c.get("shift")) for c in cks})
+    st.markdown(f"##### 🗺️ Checked in today — {n} staff &nbsp;·&nbsp; 🔄 live")
+    components.html(checkin_map_html(cks, load_sites()), height=410)
+    st.caption("Map refreshes automatically every 20 seconds · tap a pin for name & time.")
+
+
 def render_overall():
     sched = st.session_state.schedule
     st.subheader("🧋 WeDrink Sabah")
@@ -1037,11 +1055,7 @@ def render_overall():
     render_week_nav("overall")
     sweek = sched[sched.date.isin(WEEK_ISO)]
     if mode.startswith("📊"):
-        cks = todays_checkins()
-        n = len({(c["employee"], c.get("shift")) for c in cks})
-        st.markdown(f"##### 🗺️ Checked in today — {n} staff on the map")
-        components.html(checkin_map_html(cks, load_sites()), height=400)
-        st.caption("🟢 on time · 🟠 late · 📍 branch geofence — tap a pin for name & time.")
+        render_checkin_map()
         st.markdown(dashboard_html(sweek), unsafe_allow_html=True)
     elif mode.startswith("🗓️"):
         if sweek.empty:
