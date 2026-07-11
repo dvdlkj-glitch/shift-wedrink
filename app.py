@@ -928,7 +928,7 @@ with st.sidebar:
                 "<div class='wd-sb-status'><span class='dot'></span>"
                 f"<span class='txt'>Signed in · {a['user']}</span></div>",
                 unsafe_allow_html=True)
-            if st.button("🚪 Log out", use_container_width=True):
+            if st.button("🚪 Log out", width="stretch"):
                 st.session_state.is_admin = False
                 st.rerun()
         else:
@@ -946,7 +946,7 @@ def render_week_nav(context="overall"):
     today = now_myt().date()
     is_now = ws <= today <= we
     c1, c2, c3, c4 = st.columns([1, 3, 1, 2])
-    if c1.button("◀", use_container_width=True, key=f"wkprev_{context}"):
+    if c1.button("◀", width="stretch", key=f"wkprev_{context}"):
         st.session_state.week_start_iso = (ws - timedelta(days=7)).isoformat()
         st.rerun()
     badge = ("🟢 has shifts" if has else "⚪ empty") + (" · this week" if is_now else "")
@@ -956,7 +956,7 @@ def render_week_nav(context="overall"):
         f"📅 {ws.strftime('%d %b')} – {we.strftime('%d %b %Y')}</div>"
         f"<div style='font-size:11.5px;color:#8AA6A0;'>{badge}</div></div>",
         unsafe_allow_html=True)
-    if c3.button("▶", use_container_width=True, key=f"wknext_{context}"):
+    if c3.button("▶", width="stretch", key=f"wknext_{context}"):
         st.session_state.week_start_iso = (ws + timedelta(days=7)).isoformat()
         st.rerun()
     jump = c4.date_input("Jump to week", value=ws, label_visibility="collapsed",
@@ -1386,7 +1386,7 @@ def render_assign_form():
                          placeholder="e.g. requested night shift")
     pinned = st.checkbox("📌 Fixed request (pin — protect from auto-generate)", key="asg_pin")
     b1, _ = st.columns([1, 3])
-    if b1.button("➕ Add / update shift", type="primary", use_container_width=True):
+    if b1.button("➕ Add / update shift", type="primary", width="stretch"):
         df = st.session_state.schedule
         srow = {"date": diso, "day": day_name(diso), "location": loc_key, "shift": shift,
                 "employee": emp, "type": etype,
@@ -1446,20 +1446,20 @@ def render_admin():
             unsafe_allow_html=True)
         # ---- Quick jumps (coming week emphasised) ----
         j1, j2, j3 = st.columns(3)
-        if j1.button("📍 This week", use_container_width=True, key="jmp_this"):
+        if j1.button("📍 This week", width="stretch", key="jmp_this"):
             st.session_state.week_start_iso = this_mon.isoformat()
             st.rerun()
         if j2.button("➡️ Next week (arrange)", type="primary",
-                     use_container_width=True, key="jmp_next"):
+                     width="stretch", key="jmp_next"):
             st.session_state.week_start_iso = (this_mon + timedelta(days=7)).isoformat()
             st.rerun()
-        if j3.button("◀ Previous week", use_container_width=True, key="jmp_prev"):
+        if j3.button("◀ Previous week", width="stretch", key="jmp_prev"):
             st.session_state.week_start_iso = (_ws - timedelta(days=7)).isoformat()
             st.rerun()
         render_week_nav("admin")
         c1, c2, c3, c4 = st.columns([1.6, 1.3, 1, 1.4])
         with c1:
-            if st.button("⚡ Auto-generate THIS week", type="primary", use_container_width=True):
+            if st.button("⚡ Auto-generate THIS week", type="primary", width="stretch"):
                 rows = sch.generate_schedule(employees, config)
                 new = pd.DataFrame(rows)[SCHED_COLS] if rows else pd.DataFrame(columns=SCHED_COLS)
                 keep = st.session_state.schedule[~st.session_state.schedule.date.isin(WEEK_ISO)]
@@ -1468,7 +1468,7 @@ def render_admin():
                 st.success(f"Generated {len(new)} shifts for {WEEK_ISO[0]} → {WEEK_ISO[-1]}.")
         with c2:
             prev_iso = [(_ws - timedelta(days=7) + timedelta(days=i)).isoformat() for i in range(7)]
-            if st.button("📋 Copy previous week", use_container_width=True,
+            if st.button("📋 Copy previous week", width="stretch",
                          help="Seed this week from last week's arrangement, then tweak."):
                 src = st.session_state.schedule[
                     st.session_state.schedule.date.isin(prev_iso)].copy()
@@ -1488,7 +1488,7 @@ def render_admin():
                     st.success(f"Copied {len(src)} shifts into {WEEK_ISO[0]} → {WEEK_ISO[-1]}.")
                     st.rerun()
         with c3:
-            if st.button("🗑️ Clear week", use_container_width=True):
+            if st.button("🗑️ Clear week", width="stretch"):
                 st.session_state.schedule = st.session_state.schedule[
                     ~st.session_state.schedule.date.isin(WEEK_ISO)].reset_index(drop=True)
                 save_schedule(st.session_state.schedule)
@@ -1496,7 +1496,7 @@ def render_admin():
         with c4:
             st.download_button("⬇️ Download all CSV",
                                st.session_state.schedule.to_csv(index=False),
-                               file_name="schedule.csv", use_container_width=True)
+                               file_name="schedule.csv", width="stretch")
         st.caption("Build the coming week fast: **Next week → Copy previous week** (or "
                    "**Auto-generate**), then fine-tune below.")
         st.divider()
@@ -1525,7 +1525,7 @@ def render_admin():
                 st.caption("Bulk-edit THIS week's shifts. The assign form above enforces "
                            "per-employee eligible locations; this table lets you edit freely.")
                 edited = st.data_editor(
-                    sweek, num_rows="dynamic", use_container_width=True, hide_index=True,
+                    sweek, num_rows="dynamic", width="stretch", hide_index=True,
                     column_config={
                         "date": st.column_config.SelectboxColumn(
                             "Date", options=WEEK_ISO),
@@ -1629,7 +1629,7 @@ def render_admin():
             k2.metric("Total shifts", int(perf["Shifts"].sum()))
             k3.metric("Total scheduled hrs", round(perf["Scheduled hrs"].sum(), 1))
             k4.metric("Total clocked hrs", round(perf["Actual hrs (clocked)"].sum(), 1))
-            st.dataframe(perf, use_container_width=True, hide_index=True)
+            st.dataframe(perf, width="stretch", hide_index=True)
             st.bar_chart(perf.set_index("Employee")["Scheduled hrs"])
             st.markdown("##### Hours by location")
             by_loc = df.groupby("location")["hours"].sum().reset_index()
@@ -1645,7 +1645,7 @@ def render_admin():
         st.markdown("##### 👥 Employees")
         st.caption("locations = semicolon separated (Aeropod;Lintas;Beverly) · "
                    "is_core = non-consecutive full days · no_off_day = works all 7 days")
-        ed_emp = st.data_editor(employees, num_rows="dynamic", use_container_width=True,
+        ed_emp = st.data_editor(employees, num_rows="dynamic", width="stretch",
                                 hide_index=True, key="emp_editor")
         if st.button("💾 Save employees"):
             ed_emp.to_csv(EMP_CSV, index=False)
@@ -1758,7 +1758,7 @@ def render_login_gate():
             p = st.text_input("Password", value="", type="password", key="gate_pw",
                               placeholder="••••••••")
             ok = st.form_submit_button("🔓  Log in", type="primary",
-                                       use_container_width=True)
+                                       width="stretch")
         if ok:
             if verify_admin(u, p):
                 st.session_state.is_admin = True
