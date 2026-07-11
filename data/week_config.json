@@ -21,18 +21,17 @@
   "off_days": {
     "2026-07-06": ["Alya", "Nier"],
     "2026-07-07": ["Alya", "Kelvin"],
-    "2026-07-08": ["Aggie", "Eva"],
+    "2026-07-08": ["Eva"],
     "2026-07-09": ["Murni", "Yya"],
     "2026-07-10": ["Wanna"]
   },
-  "no_off_members": ["Lela", "Azz"],
+  "no_off_members": ["Layla", "Azz"],
   "shift_requests": [
     {"name": "Murni", "date": "2026-07-10", "shift": "Night", "hard": true, "note": "Requested night shift"},
     {"name": "Nier",  "date": "2026-07-10", "shift": "Night", "hard": true, "note": "Requested night shift"},
     {"name": "Nier",  "date": "2026-07-12", "shift": "Night", "hard": true, "note": "Requested night shift"},
-    {"name": "Lela",  "date": "2026-07-12", "shift": "Morning", "hard": true, "note": "Requested morning shift"},
-    {"name": "Azz",   "date": "2026-07-06", "shift": "Night", "hard": true, "note": "Requested night shift"},
-    {"name": "Aggie", "date": null, "shift": "Morning", "hard": false, "note": "Prefers morning shift (try request)"}
+    {"name": "Layla", "date": "2026-07-12", "shift": "Morning", "hard": true, "note": "Requested morning shift"},
+    {"name": "Azz",   "date": "2026-07-06", "shift": "Night", "hard": true, "note": "Requested night shift"}
   ],
   "part_availability": {
     "Qiara": {
