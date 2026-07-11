@@ -14,11 +14,12 @@ import os
 import json
 import math
 import hashlib
-from urllib.parse import quote
+import urllib.request
+import urllib.error
+from urllib.parse import quote, urlencode
 from datetime import datetime, timedelta, time
 
 import pandas as pd
-import requests
 import streamlit as st
 import streamlit.components.v1 as components
 
@@ -353,45 +354,53 @@ def db_enabled():
     return _sb()[0] is not None
 
 
-def _sb_headers(key):
-    return {"apikey": key, "Authorization": f"Bearer {key}",
-            "Content-Type": "application/json"}
+def _sb_request(path, method="GET", body=None, extra_headers=None):
+    """Minimal Supabase REST call using stdlib urllib (no 3rd-party deps).
+    Returns (status_code, text). status_code 0 on transport error."""
+    url, key = _sb()
+    if not url:
+        return 0, "Supabase not configured"
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    req = urllib.request.Request(f"{url}/rest/v1/{path}", data=data, method=method)
+    req.add_header("apikey", key)
+    req.add_header("Authorization", f"Bearer {key}")
+    req.add_header("Content-Type", "application/json")
+    for k, v in (extra_headers or {}).items():
+        req.add_header(k, v)
+    try:
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            return resp.status, resp.read().decode("utf-8", "ignore")
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode("utf-8", "ignore")[:200]
+    except Exception as e:
+        return 0, str(e)
 
 
 def db_upsert_checkin(rec):
     """Insert/update one check-in (idempotent on work_date+employee+shift).
     Returns (ok, error)."""
-    url, key = _sb()
-    if not url:
+    if not db_enabled():
         return False, "Supabase not configured"
-    try:
-        h = _sb_headers(key)
-        h["Prefer"] = "resolution=merge-duplicates,return=minimal"
-        resp = requests.post(f"{url}/rest/v1/check_ins", headers=h,
-                             json=[rec], timeout=12)
-        if resp.status_code in (200, 201, 204):
-            db_fetch_checkins.clear()
-            return True, None
-        return False, f"{resp.status_code}: {resp.text[:180]}"
-    except Exception as e:
-        return False, str(e)
+    code, text = _sb_request("check_ins", "POST", body=[rec],
+                             extra_headers={"Prefer": "resolution=merge-duplicates,return=minimal"})
+    if code in (200, 201, 204):
+        db_fetch_checkins.clear()
+        return True, None
+    return False, f"{code}: {text}"
 
 
 @st.cache_data(ttl=10, show_spinner=False)
 def db_fetch_checkins(dates_tuple):
     """Check-ins for the given ISO dates (cached ~10s). Returns list of dicts."""
-    url, key = _sb()
-    if not url or not dates_tuple:
+    if not db_enabled() or not dates_tuple:
         return []
-    try:
-        inlist = ",".join(dates_tuple)
-        resp = requests.get(f"{url}/rest/v1/check_ins", headers=_sb_headers(key),
-                            params={"select": "*", "work_date": f"in.({inlist})"},
-                            timeout=12)
-        if resp.status_code == 200:
-            return resp.json()
-    except Exception:
-        pass
+    q = urlencode({"select": "*", "work_date": f"in.({','.join(dates_tuple)})"})
+    code, text = _sb_request(f"check_ins?{q}", "GET")
+    if code == 200:
+        try:
+            return json.loads(text)
+        except Exception:
+            return []
     return []
 
 
@@ -1032,7 +1041,22 @@ def render_checkin_ui():
                "(phone browser will ask for location permission).")
 
 
-@st.fragment(run_every=20)
+def _auto_fragment(fn):
+    """Wrap fn in a 20s auto-refresh fragment when supported, else return it
+    unchanged (keeps the app importable on older Streamlit)."""
+    frag = getattr(st, "fragment", None) or getattr(st, "experimental_fragment", None)
+    if frag is None:
+        return fn
+    try:
+        return frag(run_every=20)(fn)
+    except Exception:
+        try:
+            return frag(fn)
+        except Exception:
+            return fn
+
+
+@_auto_fragment
 def render_checkin_map():
     """On-duty check-in map — reruns itself every 20s so late arrivals pop in."""
     cks = todays_checkins()
