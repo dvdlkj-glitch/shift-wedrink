@@ -591,11 +591,34 @@ def inject_css():
       .db-matrix{min-width:560px !important;}
       .db-sec{font-size:15px !important;}
       .stTabs [data-baseweb="tab"]{padding:8px 12px !important;font-size:13px !important;}
+      /* ---- phone-first: keep the hero compact so check-in is reachable ---- */
+      .hero-img{max-height:130px !important;object-fit:cover !important;}
+      /* mode/layout pickers: wrap into full, thumb-sized chips */
+      [role="radiogroup"]{flex-wrap:wrap !important;gap:8px !important;}
+      [role="radiogroup"] > label{flex:1 1 46% !important;margin:0 !important;
+        min-height:46px !important;display:flex !important;align-items:center !important;
+        justify-content:center !important;text-align:center !important;
+        background:rgba(255,255,255,.05) !important;border:1px solid var(--line) !important;
+        border-radius:12px !important;padding:8px 10px !important;}
+      [role="radiogroup"] > label[data-checked="true"],
+      [role="radiogroup"] > label:has(input:checked){
+        background:linear-gradient(135deg,#1C4A42,#123029) !important;
+        border-color:var(--wd-teal) !important;}
+      /* tap-friendly controls everywhere */
+      .stButton>button,.stDownloadButton>button{min-height:46px !important;}
+      [data-baseweb="select"]>div{min-height:46px !important;}
+      /* tabs scroll instead of squashing */
+      .stTabs [data-baseweb="tab-list"]{overflow-x:auto !important;flex-wrap:nowrap !important;
+        -webkit-overflow-scrolling:touch !important;scrollbar-width:none !important;}
+      .stTabs [data-baseweb="tab-list"]::-webkit-scrollbar{display:none !important;}
+      /* the GPS check-in iframe button spans full width */
+      iframe{width:100% !important;}
     }
     @media (max-width:480px){
       .wd-day{flex:0 0 86% !important;}
       .ms-card{flex:0 0 78% !important;}
       .db-kpi .v{font-size:26px !important;}
+      h1,h2,h3{font-size:1.1rem !important;}
     }
     </style>
     """, unsafe_allow_html=True)
@@ -815,15 +838,17 @@ def render_checkin_ui():
 
 def render_overall():
     sched = st.session_state.schedule
-    st.subheader("🧋 WeDrink Sabah — Team Schedule")
-    render_week_nav("overall")
-    sweek = sched[sched.date.isin(WEEK_ISO)]
-    mode = st.radio("view", ["🟢 Check In", "📊 On-Duty Dashboard",
-                             "🗓️ Weekly Schedule", "🙋 Find My Shifts"],
+    st.subheader("🧋 WeDrink Sabah")
+    mode = st.radio("view", ["🟢 Check In", "📊 On Duty",
+                             "🗓️ Schedule", "🙋 My Shifts"],
                     horizontal=True, label_visibility="collapsed")
     if mode.startswith("🟢"):
+        # Check-in is a today-only action — no week navigation needed.
         render_checkin_ui()
-    elif mode.startswith("📊"):
+        return
+    render_week_nav("overall")
+    sweek = sched[sched.date.isin(WEEK_ISO)]
+    if mode.startswith("📊"):
         st.markdown(dashboard_html(sweek), unsafe_allow_html=True)
     elif mode.startswith("🗓️"):
         if sweek.empty:
