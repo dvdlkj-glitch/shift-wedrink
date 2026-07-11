@@ -437,6 +437,79 @@ def _manual_record(r, clock_in_str):
             "minutes_late": int(lm)}
 
 
+def _fnum(x):
+    try:
+        return float(x)
+    except Exception:
+        return None
+
+
+def todays_checkins():
+    """Today's check-ins as a list of dicts (from Supabase, else the CSV)."""
+    today = now_myt().date().isoformat()
+    if db_enabled():
+        return db_fetch_checkins((today,))
+    df = st.session_state.schedule
+    out = []
+    sub = df[(df.date == today) & (df["clock_in"].astype(str).str.strip() != "")]
+    for _, r in sub.iterrows():
+        out.append({"employee": r["employee"], "branch": r["location"], "shift": r["shift"],
+                    "clock_in": r["clock_in"], "minutes_late": late_minutes(r["clock_in"], r["start"]) or 0,
+                    "lat": _fnum(r.get("ci_lat")), "lng": _fnum(r.get("ci_lng"))})
+    return out
+
+
+def checkin_map_html(checkins, sites, height=380):
+    """Leaflet map: branch geofences + a pin per checked-in staff at their branch."""
+    branches = [{"name": loc_label(loc), "lat": s["lat"], "lng": s["lng"],
+                 "radius": int(s.get("radius_m", 80))}
+                for loc, s in sites.items() if s.get("configured")]
+    pins = []
+    for c in checkins:
+        br = c.get("branch")
+        lat, lng = c.get("lat"), c.get("lng")
+        s = sites.get(br, {})
+        if lat is None or lng is None:
+            if not s.get("configured"):
+                continue
+            lat, lng = s["lat"], s["lng"]
+        pins.append({"name": c.get("employee", ""), "lat": float(lat), "lng": float(lng),
+                     "branch": loc_label(br), "time": str(c.get("clock_in", ""))[11:16],
+                     "late": int(c.get("minutes_late") or 0), "shift": c.get("shift", "")})
+    data = json.dumps({"branches": branches, "pins": pins})
+    tmpl = """<!DOCTYPE html><html><head>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<style>html,body,#m{height:100%;margin:0}#m{border-radius:14px;background:#0c1a20}
+.lbl{background:rgba(20,26,33,.92);border:1px solid #37D7D0;color:#EAF3F1;font:600 11px system-ui;padding:1px 6px;border-radius:6px;white-space:nowrap}
+.blbl{background:rgba(12,26,32,.85);border:1px solid rgba(80,190,180,.5);color:#9fe6e0;font:700 11px system-ui;padding:2px 8px;border-radius:8px}</style>
+</head><body><div id="m"></div><script>
+var D=__DATA__;
+var map=L.map('m',{scrollWheelZoom:false});
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'}).addTo(map);
+var pts=[];
+D.branches.forEach(function(b){
+  L.circle([b.lat,b.lng],{radius:b.radius,color:'#37D7D0',weight:1,fillColor:'#37D7D0',fillOpacity:.10}).addTo(map);
+  L.marker([b.lat,b.lng],{opacity:0}).addTo(map).bindTooltip('📍 '+b.name,{permanent:true,direction:'right',offset:[6,0],className:'blbl'});
+  pts.push([b.lat,b.lng]);
+});
+var seen={};
+D.pins.forEach(function(p){
+  var key=p.lat.toFixed(5)+','+p.lng.toFixed(5); var n=(seen[key]=(seen[key]||0)+1)-1;
+  var off=n>0?0.00018:0, ang=n*1.05;
+  var la=p.lat+off*Math.cos(ang), ln=p.lng+off*Math.sin(ang);
+  var col=p.late>0?'#F2A03D':'#2ec878';
+  var m=L.circleMarker([la,ln],{radius:8,color:'#08131a',weight:2,fillColor:col,fillOpacity:.95}).addTo(map);
+  m.bindTooltip(p.name,{permanent:true,direction:'top',offset:[0,-7],className:'lbl'});
+  m.bindPopup('<b>'+p.name+'</b><br>'+p.branch+' · '+p.shift+'<br>🕒 '+p.time+(p.late>0?(' · ⏰ '+p.late+'m late'):' · ✅ on time'));
+  pts.push([la,ln]);
+});
+if(pts.length){map.fitBounds(pts,{padding:[40,40],maxZoom:16});}else{map.setView([5.95,116.08],12);}
+setTimeout(function(){map.invalidateSize();},250);
+</script></body></html>"""
+    return tmpl.replace("__DATA__", data)
+
+
 def do_checkin(emp, lat, lng, acc):
     """Validate a GPS check-in against today's shift + branch geofence, and
     stamp clock_in on success. Returns a result dict for the banner."""
@@ -781,6 +854,9 @@ def grid_html(sched, loc, who=None):
             me = " me" if who and who != "— show all —" and r["employee"] == who else ""
             pt = '<span class="wd-badge wd-pt">PT</span>' if r["type"] == "part" else ""
             pin = '<span class="wd-badge wd-pin">★</span>' if r["status"] == "pinned" else ""
+            ci = str(r.get("clock_in", "")).strip()
+            ck = (f'<span class="wd-badge" style="background:rgba(46,200,120,.22);color:#67E0A3">'
+                  f'✓ {ci[11:16] or ci}</span>') if ci else ""
             nm = str(r["employee"]).strip()
             initials = (nm[0] + (nm[1] if len(nm) > 1 else "")).upper()
             chips += (f'<div class="wd-chip{me}" style="--sc:{col}">'
@@ -788,7 +864,7 @@ def grid_html(sched, loc, who=None):
                       f'<div class="wd-info">'
                       f'<div class="nm">{nm}'
                       f'<span class="wd-tag" style="background:{col}26;color:{col}">{r["shift"]}</span>'
-                      f'{pt}{pin}</div>'
+                      f'{pt}{pin}{ck}</div>'
                       f'<div class="tm">{r["start"]}&ndash;{r["end"]}</div>'
                       f'</div></div>')
         body = chips if chips else '<div class="wd-empty">&mdash;</div>'
@@ -961,11 +1037,17 @@ def render_overall():
     render_week_nav("overall")
     sweek = sched[sched.date.isin(WEEK_ISO)]
     if mode.startswith("📊"):
+        cks = todays_checkins()
+        n = len({(c["employee"], c.get("shift")) for c in cks})
+        st.markdown(f"##### 🗺️ Checked in today — {n} staff on the map")
+        components.html(checkin_map_html(cks, load_sites()), height=400)
+        st.caption("🟢 on time · 🟠 late · 📍 branch geofence — tap a pin for name & time.")
         st.markdown(dashboard_html(sweek), unsafe_allow_html=True)
     elif mode.startswith("🗓️"):
         if sweek.empty:
             st.info("No shifts for this week yet. Ask your Admin to create the schedule.")
         else:
+            sweek = overlay_checkins(sweek)  # show ✓ on staff who've checked in
             style = st.radio("layout", ["🗓️ Calendar cards", "🔲 Shift board"],
                              horizontal=True, label_visibility="collapsed")
             for loc in config["locations"]:
@@ -973,7 +1055,7 @@ def render_overall():
                     st.markdown(grid_html(sweek, loc), unsafe_allow_html=True)
                 else:
                     st.markdown(shift_board_html(sweek, loc), unsafe_allow_html=True)
-            st.caption("⭐ = fixed request · ⏳ = part-timer · read-only view.")
+            st.caption("✓ = checked in · ⭐ = fixed request · ⏳ = part-timer · read-only view.")
     else:
         who = st.selectbox("🔎 Choose your name to see your week",
                            ["— select —"] + list(employees["name"]))
@@ -1396,10 +1478,11 @@ def render_admin():
             if view == "Weekly grid":
                 loc_filter = st.multiselect("Filter location", config["locations"],
                                             default=config["locations"], format_func=loc_label)
+                sweek_ck = overlay_checkins(sweek)  # show ✓ on checked-in staff
                 for loc in config["locations"]:
                     if loc not in loc_filter:
                         continue
-                    st.markdown(grid_html(sweek, loc), unsafe_allow_html=True)
+                    st.markdown(grid_html(sweek_ck, loc), unsafe_allow_html=True)
             else:
                 st.caption("Bulk-edit THIS week's shifts. The assign form above enforces "
                            "per-employee eligible locations; this table lets you edit freely.")
