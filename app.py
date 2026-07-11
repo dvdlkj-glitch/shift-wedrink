@@ -12,11 +12,14 @@ that employee is cleared to work. 6-12 July 2026 loaded as real test data.
 """
 import os
 import json
+import math
 import hashlib
+from urllib.parse import quote
 from datetime import datetime, timedelta, time
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 try:
     from zoneinfo import ZoneInfo
@@ -31,6 +34,18 @@ EMP_CSV = os.path.join(DATA_DIR, "employees.csv")
 CFG_JSON = os.path.join(DATA_DIR, "week_config.json")
 SCHED_CSV = os.path.join(DATA_DIR, "schedule.csv")
 ADMIN_JSON = os.path.join(DATA_DIR, "admin.json")
+SITES_JSON = os.path.join(DATA_DIR, "sites.json")
+
+# GPS geofence per branch. Coordinates are PLACEHOLDERS — an admin must stand at
+# each branch and capture the real centre (Setup ▸ Branch check-in geofences).
+# "configured": False disables staff check-in for that branch until it is set.
+DEFAULT_SITES = {
+    "Aeropod": {"lat": 5.9389, "lng": 116.0539, "radius_m": 80, "configured": False},
+    "Lintas":  {"lat": 5.9631, "lng": 116.0736, "radius_m": 80, "configured": False},
+    "Beverly": {"lat": 5.9436, "lng": 116.0895, "radius_m": 80, "configured": False},
+}
+# Reject a fix this coarse — it's a WiFi/cell estimate, not real GPS (anti-spoof).
+MAX_ACCURACY_M = 150
 
 BRAND_GREEN = "#1C4A42"
 BRAND_GREEN2 = "#15382F"
@@ -96,7 +111,8 @@ def now_myt():
 
 
 SCHED_COLS = ["date", "day", "location", "shift", "employee", "type",
-              "start", "end", "hours", "status", "note", "clock_in", "clock_out"]
+              "start", "end", "hours", "status", "note", "clock_in", "clock_out",
+              "ci_lat", "ci_lng", "ci_acc", "ci_dist", "ci_method"]
 
 
 def load_schedule():
@@ -125,6 +141,174 @@ def actual_hours(ci, co):
         except Exception:
             continue
     return None
+
+
+# ===================== GPS CHECK-IN =====================
+def load_sites():
+    """Branch geofences {loc: {lat,lng,radius_m,configured}}. Auto-seeds any
+    location missing from sites.json so new branches never break check-in."""
+    d = {}
+    if os.path.exists(SITES_JSON):
+        try:
+            d = json.load(open(SITES_JSON))
+        except Exception:
+            d = {}
+    changed = False
+    for loc in config["locations"]:
+        if loc not in d:
+            d[loc] = dict(DEFAULT_SITES.get(
+                loc, {"lat": 5.98, "lng": 116.07, "radius_m": 80, "configured": False}))
+            changed = True
+    if changed:
+        try:
+            save_sites(d)
+        except Exception:
+            pass
+    return d
+
+
+def save_sites(d):
+    json.dump(d, open(SITES_JSON, "w"), indent=2)
+
+
+def haversine_m(lat1, lng1, lat2, lng2):
+    """Great-circle distance in metres."""
+    R = 6371000.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlmb = math.radians(lng2 - lng1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlmb / 2) ** 2
+    return 2 * R * math.asin(math.sqrt(a))
+
+
+def geo_checkin_html(emp, branch, radius_m):
+    """A big check-in button that captures GPS on a real tap (iOS-safe) and
+    hands lat/lng/accuracy back to Streamlit via a top-window query string.
+    Same Geolocation method as attendance-pro.html."""
+    emp_q = quote(str(emp))
+    return f"""
+<div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif">
+  <button id="gbtn" style="width:100%;min-height:58px;border:none;border-radius:14px;
+    font-size:17px;font-weight:700;color:#06231f;cursor:pointer;
+    background:linear-gradient(135deg,#37D7D0,#1C9C96);box-shadow:0 8px 22px rgba(55,215,208,.35)">
+    📍 Check in now
+  </button>
+  <div id="gmsg" style="margin-top:10px;font-size:13px;color:#8AA6A0;min-height:18px"></div>
+</div>
+<script>
+(function(){{
+  var b=document.getElementById('gbtn'), m=document.getElementById('gmsg');
+  b.onclick=function(){{
+    if(!navigator.geolocation){{m.textContent='This device does not support GPS.';return;}}
+    b.disabled=true; b.style.opacity=.6; m.textContent='Getting your location…';
+    navigator.geolocation.getCurrentPosition(function(pos){{
+      var lat=pos.coords.latitude.toFixed(6),
+          lng=pos.coords.longitude.toFixed(6),
+          acc=Math.round(pos.coords.accuracy);
+      var q='?att=1&emp={emp_q}&lat='+lat+'&lng='+lng+'&acc='+acc+'&t='+Date.now();
+      try{{ window.top.location.search=q; }}catch(e){{ window.location.search=q; }}
+    }}, function(err){{
+      b.disabled=false; b.style.opacity=1;
+      var t={{1:'Location permission denied — allow it in your browser and retry.',
+              2:'Position unavailable — move outdoors / near a window.',
+              3:'Timed out — please try again.'}};
+      m.textContent=t[err.code]||('Location error: '+err.message);
+    }}, {{enableHighAccuracy:true, timeout:12000, maximumAge:0}});
+  }};
+}})();
+</script>
+"""
+
+
+def geo_show_html():
+    """Read-only helper for admins: shows current GPS so they can type it into
+    the geofence fields. No redirect, so it never drops the admin session."""
+    return """
+<div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif">
+  <button id="lbtn" style="border:1px solid rgba(80,190,180,.4);border-radius:10px;
+    padding:10px 16px;font-size:14px;font-weight:600;color:#EAF3F1;cursor:pointer;
+    background:rgba(55,215,208,.14)">📍 Get my current GPS</button>
+  <div id="lout" style="margin-top:9px;font-family:'JetBrains Mono',monospace;
+    font-size:14px;color:#37D7D0;min-height:20px"></div>
+</div>
+<script>
+(function(){
+  var b=document.getElementById('lbtn'), o=document.getElementById('lout');
+  b.onclick=function(){
+    if(!navigator.geolocation){o.textContent='No GPS support.';return;}
+    b.disabled=true; o.textContent='Locating…';
+    navigator.geolocation.getCurrentPosition(function(p){
+      b.disabled=false;
+      o.innerHTML='lat '+p.coords.latitude.toFixed(6)+' &nbsp; lng '+
+        p.coords.longitude.toFixed(6)+' &nbsp; (±'+Math.round(p.coords.accuracy)+
+        ' m)<br><span style="color:#8AA6A0;font-family:system-ui">Type these into the branch fields, then Save.</span>';
+    }, function(e){ b.disabled=false; o.textContent='Error: '+(e.message||e.code); },
+    {enableHighAccuracy:true,timeout:12000,maximumAge:0});
+  };
+})();
+</script>
+"""
+
+
+def do_checkin(emp, lat, lng, acc):
+    """Validate a GPS check-in against today's shift + branch geofence, and
+    stamp clock_in on success. Returns a result dict for the banner."""
+    today = now_myt().date().isoformat()
+    df = st.session_state.schedule
+    todays = df[(df.employee == emp) & (df.date == today)].sort_values("start")
+    if todays.empty:
+        return {"ok": False, "msg": f"No shift scheduled for {emp} today ({today}). "
+                                    "Nothing to check in to — please check with your admin."}
+    pending = todays[todays["clock_in"].astype(str).str.strip() == ""]
+    if pending.empty:
+        first = todays.iloc[0]
+        return {"ok": True, "already": True,
+                "msg": f"{emp} is already checked in today at {first['clock_in']}. ✓"}
+    target_idx = pending.index[0]
+    r = df.loc[target_idx]
+    branch = r["location"]
+    site = load_sites().get(branch, {})
+    if not site.get("configured"):
+        return {"ok": False, "msg": f"Check-in for {loc_label(branch)} isn't enabled yet — "
+                                    "ask your admin to set the branch location (Setup)."}
+    if acc and acc > MAX_ACCURACY_M:
+        return {"ok": False, "msg": f"GPS signal too weak (±{round(acc)} m). Move outdoors or "
+                                    "near a window and try again."}
+    dist = haversine_m(lat, lng, site["lat"], site["lng"])
+    radius = float(site.get("radius_m", 80))
+    if dist > radius:
+        return {"ok": False, "msg": f"You're about {round(dist)} m from {loc_label(branch)} "
+                                    f"(must be within {round(radius)} m). Move closer and retry."}
+    stamp = now_myt().strftime("%Y-%m-%d %H:%M")
+    df.at[target_idx, "clock_in"] = stamp
+    df.at[target_idx, "ci_lat"] = str(round(lat, 6))
+    df.at[target_idx, "ci_lng"] = str(round(lng, 6))
+    df.at[target_idx, "ci_acc"] = str(round(acc))
+    df.at[target_idx, "ci_dist"] = str(round(dist))
+    df.at[target_idx, "ci_method"] = "gps"
+    st.session_state.schedule = df[SCHED_COLS]
+    save_schedule(st.session_state.schedule)
+    return {"ok": True, "msg": f"✓ {emp} checked in at {stamp} · {loc_label(branch)} · "
+                               f"{SHIFT_ICON.get(r['shift'], '')} {r['shift']} shift · "
+                               f"{round(dist)} m from centre (±{round(acc)} m GPS)."}
+
+
+def process_checkin_qp():
+    """Handle the ?att=1 redirect fired by the check-in button, then clean the URL."""
+    qp = st.query_params
+    if qp.get("att") != "1":
+        return
+    emp = qp.get("emp", "")
+    try:
+        lat = float(qp.get("lat"))
+        lng = float(qp.get("lng"))
+        acc = float(qp.get("acc", "0"))
+        res = do_checkin(emp, lat, lng, acc)
+    except Exception:
+        res = {"ok": False, "msg": "Could not read GPS coordinates — please try again."}
+    st.session_state.checkin_result = res
+    st.query_params.clear()
+    st.rerun()
 
 
 if "schedule" not in st.session_state:
@@ -399,6 +583,19 @@ st.caption(
     f"Time zone: Asia/Kuching (UTC+8)  •  Now: {now_myt().strftime('%a %d %b %Y, %H:%M')}"
 )
 
+# Handle a GPS check-in redirect (?att=1…); runs here so all helpers are defined.
+process_checkin_qp()
+
+# GPS check-in result (survives the check-in page reload via session_state).
+_ci_res = st.session_state.pop("checkin_result", None)
+if _ci_res:
+    if _ci_res.get("ok") and not _ci_res.get("already"):
+        st.success(_ci_res["msg"])
+    elif _ci_res.get("already"):
+        st.info(_ci_res["msg"])
+    else:
+        st.error(_ci_res["msg"])
+
 with st.sidebar:
     st.markdown("### 👤 View")
     view_mode = st.radio("Choose view", ["👀 Overall (staff)", "🔐 Admin"],
@@ -450,14 +647,70 @@ def render_week_nav(context="overall"):
         st.rerun()
 
 
+def render_checkin_ui():
+    today = now_myt().date()
+    st.markdown("#### 🟢 Start-of-shift GPS Check-In")
+    st.caption(f"Pick your name, then tap **Check in now** at your branch.  "
+               f"Today: {today.strftime('%a %d %b %Y')} · {now_myt().strftime('%H:%M')} (Sabah time)")
+    who = st.selectbox("Your name", ["— select your name —"] + list(employees["name"]),
+                       key="ci_who")
+    if who == "— select your name —":
+        st.info("Select your name above to check in.")
+        return
+
+    df = st.session_state.schedule
+    todays = df[(df.employee == who) & (df.date == today.isoformat())].sort_values("start")
+    if todays.empty:
+        st.warning(f"No shift scheduled for **{who}** today. "
+                   "If that's wrong, please ask your admin to add it.")
+        return
+
+    # Show today's shift(s) and their check-in status.
+    for _, r in todays.iterrows():
+        done = str(r["clock_in"]).strip()
+        col = SHIFT_COLORS.get(r["shift"], "#37D7D0")
+        status = (f"<span style='color:#67E0A3;font-weight:700'>✓ checked in {done}</span>"
+                  if done else "<span style='color:#F2C070;font-weight:700'>not checked in</span>")
+        st.markdown(
+            f"<div style='background:rgba(9,20,24,.55);border:1px solid rgba(120,200,190,.14);"
+            f"border-left:4px solid {col};border-radius:12px;padding:11px 14px;margin:6px 0'>"
+            f"<b>{LOC_EMOJI.get(r['location'],'📍')} {loc_label(r['location'])}</b> · "
+            f"{SHIFT_ICON.get(r['shift'],'')} {r['shift']} · {r['start']}–{r['end']} &nbsp; {status}"
+            f"</div>", unsafe_allow_html=True)
+
+    pending = todays[todays["clock_in"].astype(str).str.strip() == ""]
+    if pending.empty:
+        st.success("You're all checked in for today — have a great shift! 🧋")
+        return
+
+    tgt = pending.iloc[0]
+    branch = tgt["location"]
+    site = load_sites().get(branch, {})
+    radius = int(site.get("radius_m", 80))
+    if not site.get("configured"):
+        st.error(f"Check-in for **{loc_label(branch)}** isn't set up yet. "
+                 "Ask your admin to capture the branch location under **Admin ▸ Setup**.")
+        return
+
+    st.markdown(f"**Checking in to {loc_label(branch)}** — you must be within "
+                f"**{radius} m** of the shop.")
+    components.html(geo_checkin_html(who, branch, radius), height=110)
+    st.caption("Your location is captured only when you tap the button, and only used to "
+               "confirm you're at the branch. Works on the deployed https:// link "
+               "(phone browser will ask for location permission).")
+
+
 def render_overall():
     sched = st.session_state.schedule
     st.subheader("🧋 WeDrink Sabah — Team Schedule")
     render_week_nav("overall")
     sweek = sched[sched.date.isin(WEEK_ISO)]
-    mode = st.radio("view", ["📊 On-Duty Dashboard", "🗓️ Weekly Schedule", "🙋 Find My Shifts"],
+    mode = st.radio("view", ["🟢 Check In", "📊 On-Duty Dashboard",
+                             "🗓️ Weekly Schedule", "🙋 Find My Shifts"],
                     horizontal=True, label_visibility="collapsed")
-    if mode.startswith("📊"):
+    if mode.startswith("🟢"):
+        render_checkin_ui()
+    elif mode.startswith("📊"):
         st.markdown(dashboard_html(sweek), unsafe_allow_html=True)
     elif mode.startswith("🗓️"):
         if sweek.empty:
@@ -930,10 +1183,14 @@ def render_admin():
             day_rows = sched[sched.date == d_sel]
             if day_rows.empty:
                 st.info("No shifts on this day.")
+            st.caption("📍 = staff GPS self-check-in (distance from branch centre shown).")
             for idx, r in day_rows.iterrows():
                 cols = st.columns([2.4, 1.4, 1.4, 1, 1])
+                gps = ""
+                if str(r.get("ci_method", "")) == "gps":
+                    gps = f" · 📍GPS {r.get('ci_dist','?')}m"
                 cols[0].markdown(f"**{r['employee']}** · {SHIFT_ICON.get(r['shift'],'')} {r['shift']} "
-                                 f"· 📍{loc_label(r['location'])} · {r['start']}-{r['end']}")
+                                 f"· 📍{loc_label(r['location'])} · {r['start']}-{r['end']}{gps}")
                 ci = cols[1].text_input("Clock in", value=r["clock_in"], key=f"ci_{idx}",
                                         label_visibility="collapsed", placeholder="clock in")
                 co = cols[2].text_input("Clock out", value=r["clock_out"], key=f"co_{idx}",
@@ -1013,6 +1270,32 @@ def render_admin():
                 ["name", "date", "shift", "hard", "note"]])
         st.markdown("##### 🕒 Part-time availability")
         st.table(pd.DataFrame(config.get("part_availability", {})).T)
+        st.markdown("##### 📍 Branch check-in geofences (GPS)")
+        st.caption("Stand at each branch, tap **Get my current GPS**, type the numbers into that "
+                   "branch's fields, set the radius (≈80 m), then **Save**. Staff can only "
+                   "check in within this radius. Coordinates ship as placeholders — set the real "
+                   "ones on-site before going live.")
+        sites = load_sites()
+        components.html(geo_show_html(), height=120)
+        for loc in config["locations"]:
+            s = sites.get(loc, {})
+            flag = "🟢 set" if s.get("configured") else "⚪ not set — check-in disabled"
+            st.markdown(f"**{LOC_EMOJI.get(loc, '📍')} {loc_label(loc)}** &nbsp; {flag}")
+            cc = st.columns([1.3, 1.3, 1, 1])
+            lat = cc[0].number_input("Latitude", value=float(s.get("lat", 5.98)),
+                                     format="%.6f", key=f"slat_{loc}")
+            lng = cc[1].number_input("Longitude", value=float(s.get("lng", 116.07)),
+                                     format="%.6f", key=f"slng_{loc}")
+            rad = cc[2].number_input("Radius (m)", value=int(s.get("radius_m", 80)),
+                                     min_value=20, max_value=500, step=10, key=f"srad_{loc}")
+            cc[3].markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+            if cc[3].button("💾 Save", key=f"ssave_{loc}"):
+                sites[loc] = {"lat": float(lat), "lng": float(lng),
+                              "radius_m": int(rad), "configured": True}
+                save_sites(sites)
+                st.success(f"{loc_label(loc)} check-in location saved (radius {int(rad)} m).")
+                st.rerun()
+
         st.markdown("##### ⏰ Shift definitions")
         fs = pd.DataFrame(config["full_shifts"]).T.reset_index().rename(columns={"index": "Full shift"})
         ps = pd.DataFrame(config["part_shifts"]).T.reset_index().rename(columns={"index": "Part shift"})

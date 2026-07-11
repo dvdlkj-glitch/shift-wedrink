@@ -1,0 +1,5 @@
+{
+  "Aeropod": {"lat": 5.9389, "lng": 116.0539, "radius_m": 80, "configured": false},
+  "Lintas":  {"lat": 5.9631, "lng": 116.0736, "radius_m": 80, "configured": false},
+  "Beverly": {"lat": 5.9436, "lng": 116.0895, "radius_m": 80, "configured": false}
+}
