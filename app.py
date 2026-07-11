@@ -35,6 +35,11 @@ CFG_JSON = os.path.join(DATA_DIR, "week_config.json")
 SCHED_CSV = os.path.join(DATA_DIR, "schedule.csv")
 ADMIN_JSON = os.path.join(DATA_DIR, "admin.json")
 SITES_JSON = os.path.join(DATA_DIR, "sites.json")
+SETTINGS_JSON = os.path.join(DATA_DIR, "settings.json")
+
+# Staff may check in this many minutes before their shift start (admin-adjustable
+# in Setup). Late check-ins are always allowed and recorded with minutes late.
+DEFAULT_EARLY_MIN = 15
 
 # GPS geofence per branch. Coordinates are PLACEHOLDERS — an admin must stand at
 # each branch and capture the real centre (Setup ▸ Branch check-in geofences).
@@ -181,6 +186,84 @@ def haversine_m(lat1, lng1, lat2, lng2):
     return 2 * R * math.asin(math.sqrt(a))
 
 
+def load_settings():
+    d = {"early_min": DEFAULT_EARLY_MIN}
+    if os.path.exists(SETTINGS_JSON):
+        try:
+            d.update(json.load(open(SETTINGS_JSON)) or {})
+        except Exception:
+            pass
+    return d
+
+
+def save_settings(d):
+    json.dump(d, open(SETTINGS_JSON, "w"), indent=2)
+
+
+def early_min():
+    try:
+        return int(load_settings().get("early_min", DEFAULT_EARLY_MIN))
+    except Exception:
+        return DEFAULT_EARLY_MIN
+
+
+def _min_of_day(hhmm):
+    """'HH:MM' -> minutes since midnight, or None."""
+    try:
+        h, m = str(hhmm).split(":")[:2]
+        return int(h) * 60 + int(m)
+    except Exception:
+        return None
+
+
+def _fmt_min(m):
+    m = max(0, int(m)) % (24 * 60)
+    return f"{m // 60:02d}:{m % 60:02d}"
+
+
+def late_minutes(clock_in_str, start_str):
+    """Minutes a clock-in is past its shift start (0 if on time / early)."""
+    try:
+        ci = datetime.strptime(str(clock_in_str).strip(), "%Y-%m-%d %H:%M")
+        sm = _min_of_day(start_str)
+        if sm is None:
+            return None
+        return max(0, (ci.hour * 60 + ci.minute) - sm)
+    except Exception:
+        return None
+
+
+def pick_checkin_target(todays, now_min, window):
+    """Choose which of today's shifts a staff member can check into now.
+
+    Returns (row, status, open_min):
+      status 'empty'     -> no shift today
+      status 'done'      -> every shift already checked in
+      status 'too_early' -> a pending shift exists but its window hasn't opened;
+                            row = the soonest one, open_min = when it opens
+      status 'ok'        -> row is checkable now
+    Check-in opens at (shift start - window) and never closes (late allowed).
+    """
+    if todays.empty:
+        return None, "empty", None
+    pending = todays[todays["clock_in"].astype(str).str.strip() == ""].sort_values("start")
+    if pending.empty:
+        return None, "done", None
+    soonest = None  # (open_min, row)
+    for _, r in pending.iterrows():
+        sm = _min_of_day(r["start"])
+        if sm is None:
+            continue
+        open_m = sm - window
+        if now_min >= open_m:
+            return r, "ok", open_m
+        if soonest is None or open_m < soonest[0]:
+            soonest = (open_m, r)
+    if soonest:
+        return soonest[1], "too_early", soonest[0]
+    return None, "empty", None
+
+
 def geo_checkin_html(emp, branch, radius_m):
     """A big check-in button that captures GPS on a real tap (iOS-safe) and
     hands lat/lng/accuracy back to Streamlit via a top-window query string.
@@ -253,19 +336,27 @@ def geo_show_html():
 def do_checkin(emp, lat, lng, acc):
     """Validate a GPS check-in against today's shift + branch geofence, and
     stamp clock_in on success. Returns a result dict for the banner."""
-    today = now_myt().date().isoformat()
+    now = now_myt()
+    today = now.date().isoformat()
+    now_min = now.hour * 60 + now.minute
     df = st.session_state.schedule
     todays = df[(df.employee == emp) & (df.date == today)].sort_values("start")
     if todays.empty:
         return {"ok": False, "msg": f"No shift scheduled for {emp} today ({today}). "
                                     "Nothing to check in to — please check with your admin."}
-    pending = todays[todays["clock_in"].astype(str).str.strip() == ""]
-    if pending.empty:
+    target, status, open_m = pick_checkin_target(todays, now_min, early_min())
+    if status == "done":
         first = todays.iloc[0]
         return {"ok": True, "already": True,
                 "msg": f"{emp} is already checked in today at {first['clock_in']}. ✓"}
-    target_idx = pending.index[0]
-    r = df.loc[target_idx]
+    if status == "too_early":
+        return {"ok": False, "msg": f"Too early — check-in for your "
+                                    f"{target['shift']} shift ({target['start']}) opens at "
+                                    f"{_fmt_min(open_m)}. Come back then."}
+    if target is None:
+        return {"ok": False, "msg": "No shift available to check in to right now."}
+    r = target
+    target_idx = r.name
     branch = r["location"]
     site = load_sites().get(branch, {})
     if not site.get("configured"):
@@ -279,7 +370,8 @@ def do_checkin(emp, lat, lng, acc):
     if dist > radius:
         return {"ok": False, "msg": f"You're about {round(dist)} m from {loc_label(branch)} "
                                     f"(must be within {round(radius)} m). Move closer and retry."}
-    stamp = now_myt().strftime("%Y-%m-%d %H:%M")
+    stamp = now.strftime("%Y-%m-%d %H:%M")
+    late = max(0, now_min - (_min_of_day(r["start"]) or now_min))
     df.at[target_idx, "clock_in"] = stamp
     df.at[target_idx, "ci_lat"] = str(round(lat, 6))
     df.at[target_idx, "ci_lng"] = str(round(lng, 6))
@@ -288,8 +380,9 @@ def do_checkin(emp, lat, lng, acc):
     df.at[target_idx, "ci_method"] = "gps"
     st.session_state.schedule = df[SCHED_COLS]
     save_schedule(st.session_state.schedule)
+    late_txt = f"⏰ {late} min late" if late > 0 else "✅ on time"
     return {"ok": True, "msg": f"✓ {emp} checked in at {stamp} · {loc_label(branch)} · "
-                               f"{SHIFT_ICON.get(r['shift'], '')} {r['shift']} shift · "
+                               f"{SHIFT_ICON.get(r['shift'], '')} {r['shift']} shift · {late_txt} · "
                                f"{round(dist)} m from centre (±{round(acc)} m GPS)."}
 
 
@@ -648,10 +741,14 @@ def render_week_nav(context="overall"):
 
 
 def render_checkin_ui():
-    today = now_myt().date()
+    now = now_myt()
+    today = now.date()
+    now_min = now.hour * 60 + now.minute
+    win = early_min()
     st.markdown("#### 🟢 Start-of-shift GPS Check-In")
-    st.caption(f"Pick your name, then tap **Check in now** at your branch.  "
-               f"Today: {today.strftime('%a %d %b %Y')} · {now_myt().strftime('%H:%M')} (Sabah time)")
+    st.caption(f"Pick your name, then tap **Check in now** at your branch.  Check-in opens "
+               f"**{win} min** before your shift.  Today: {today.strftime('%a %d %b %Y')} · "
+               f"{now.strftime('%H:%M')} (Sabah time)")
     who = st.selectbox("Your name", ["— select your name —"] + list(employees["name"]),
                        key="ci_who")
     if who == "— select your name —":
@@ -669,8 +766,14 @@ def render_checkin_ui():
     for _, r in todays.iterrows():
         done = str(r["clock_in"]).strip()
         col = SHIFT_COLORS.get(r["shift"], "#37D7D0")
-        status = (f"<span style='color:#67E0A3;font-weight:700'>✓ checked in {done}</span>"
-                  if done else "<span style='color:#F2C070;font-weight:700'>not checked in</span>")
+        if done:
+            lm = late_minutes(done, r["start"])
+            tag = (f" · ⏰ {lm} min late" if lm else " · ✅ on time")
+            status = f"<span style='color:#67E0A3;font-weight:700'>✓ checked in {done}{tag}</span>"
+        else:
+            opens = _fmt_min((_min_of_day(r["start"]) or 0) - win)
+            status = (f"<span style='color:#F2C070;font-weight:700'>not checked in</span>"
+                      f"<span style='color:#8AA6A0'> · opens {opens}</span>")
         st.markdown(
             f"<div style='background:rgba(9,20,24,.55);border:1px solid rgba(120,200,190,.14);"
             f"border-left:4px solid {col};border-radius:12px;padding:11px 14px;margin:6px 0'>"
@@ -678,13 +781,20 @@ def render_checkin_ui():
             f"{SHIFT_ICON.get(r['shift'],'')} {r['shift']} · {r['start']}–{r['end']} &nbsp; {status}"
             f"</div>", unsafe_allow_html=True)
 
-    pending = todays[todays["clock_in"].astype(str).str.strip() == ""]
-    if pending.empty:
+    target, status, open_m = pick_checkin_target(todays, now_min, win)
+    if status == "done":
         st.success("You're all checked in for today — have a great shift! 🧋")
         return
+    if status == "too_early":
+        st.info(f"⏳ Check-in for your **{target['shift']}** shift ({target['start']}) opens at "
+                f"**{_fmt_min(open_m)}** — {win} min before start. Come back then.")
+        return
+    if target is None:
+        st.info("No shift available to check in to right now.")
+        return
 
-    tgt = pending.iloc[0]
-    branch = tgt["location"]
+    r = target
+    branch = r["location"]
     site = load_sites().get(branch, {})
     radius = int(site.get("radius_m", 80))
     if not site.get("configured"):
@@ -692,8 +802,11 @@ def render_checkin_ui():
                  "Ask your admin to capture the branch location under **Admin ▸ Setup**.")
         return
 
-    st.markdown(f"**Checking in to {loc_label(branch)}** — you must be within "
-                f"**{radius} m** of the shop.")
+    late = max(0, now_min - (_min_of_day(r["start"]) or now_min))
+    late_note = (f"  ⏰ You're **{late} min** past the {r['start']} start — this will record as a "
+                 "late check-in." if late > 0 else "")
+    st.markdown(f"**Checking in to {loc_label(branch)} — {SHIFT_ICON.get(r['shift'],'')} "
+                f"{r['shift']} shift.** You must be within **{radius} m** of the shop.{late_note}")
     components.html(geo_checkin_html(who, branch, radius), height=110)
     st.caption("Your location is captured only when you tap the button, and only used to "
                "confirm you're at the branch. Works on the deployed https:// link "
@@ -1183,12 +1296,16 @@ def render_admin():
             day_rows = sched[sched.date == d_sel]
             if day_rows.empty:
                 st.info("No shifts on this day.")
-            st.caption("📍 = staff GPS self-check-in (distance from branch centre shown).")
+            st.caption("📍 = staff GPS self-check-in (distance from branch centre shown) · "
+                       "⏰ = minutes late vs shift start.")
             for idx, r in day_rows.iterrows():
                 cols = st.columns([2.4, 1.4, 1.4, 1, 1])
                 gps = ""
                 if str(r.get("ci_method", "")) == "gps":
                     gps = f" · 📍GPS {r.get('ci_dist','?')}m"
+                lm = late_minutes(r["clock_in"], r["start"]) if str(r["clock_in"]).strip() else None
+                if lm is not None:
+                    gps += f" · ⏰{lm}m late" if lm > 0 else " · ✅on time"
                 cols[0].markdown(f"**{r['employee']}** · {SHIFT_ICON.get(r['shift'],'')} {r['shift']} "
                                  f"· 📍{loc_label(r['location'])} · {r['start']}-{r['end']}{gps}")
                 ci = cols[1].text_input("Clock in", value=r["clock_in"], key=f"ci_{idx}",
@@ -1270,6 +1387,22 @@ def render_admin():
                 ["name", "date", "shift", "hard", "note"]])
         st.markdown("##### 🕒 Part-time availability")
         st.table(pd.DataFrame(config.get("part_availability", {})).T)
+        st.markdown("##### ⏳ Check-in time window")
+        stt = load_settings()
+        wc1, wc2 = st.columns([2, 1])
+        new_win = wc1.number_input(
+            "Early check-in window — minutes before shift start",
+            min_value=0, max_value=120, step=5,
+            value=int(stt.get("early_min", DEFAULT_EARLY_MIN)), key="early_min_setting")
+        wc2.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+        if wc2.button("💾 Save window", key="save_early_min"):
+            stt["early_min"] = int(new_win)
+            save_settings(stt)
+            st.success(f"Check-in now opens {int(new_win)} min before each shift start.")
+            st.rerun()
+        st.caption("Staff can check in from this many minutes before their shift starts. "
+                   "Late check-ins are always allowed and recorded with minutes late.")
+
         st.markdown("##### 📍 Branch check-in geofences (GPS)")
         st.caption("Stand at each branch, tap **Get my current GPS**, type the numbers into that "
                    "branch's fields, set the radius (≈80 m), then **Save**. Staff can only "
