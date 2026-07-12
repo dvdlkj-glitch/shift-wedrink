@@ -122,7 +122,7 @@ SCHED_COLS = ["date", "day", "location", "shift", "employee", "type",
               "ci_lat", "ci_lng", "ci_acc", "ci_dist", "ci_method"]
 
 
-def load_schedule():
+def _load_schedule_csv():
     if os.path.exists(SCHED_CSV):
         df = pd.read_csv(SCHED_CSV, dtype=str).fillna("")
         for c in SCHED_COLS:
@@ -133,8 +133,32 @@ def load_schedule():
     return pd.DataFrame(columns=SCHED_COLS)
 
 
-def save_schedule(df):
+def _save_schedule_csv(df):
     df.to_csv(SCHED_CSV, index=False)
+
+
+def load_schedule():
+    """Roster from Supabase when configured (durable across redeploys), else the
+    local CSV. On the first DB run the committed CSV seeds the shifts table."""
+    if db_enabled():
+        df = db_fetch_shifts()
+        if df is None:                 # transport error — use CSV for this run
+            return _load_schedule_csv()
+        if df.empty:                   # empty table — migrate the committed CSV in
+            seed = _load_schedule_csv()
+            if not seed.empty:
+                db_replace_shifts(seed)
+                return seed
+        return df
+    return _load_schedule_csv()
+
+
+def save_schedule(df):
+    """Persist the whole roster — to Supabase (durable) when configured, else CSV."""
+    if db_enabled():
+        db_replace_shifts(df)
+    else:
+        _save_schedule_csv(df)
 
 
 def actual_hours(ci, co):
@@ -374,6 +398,49 @@ def _sb_request(path, method="GET", body=None, extra_headers=None):
         return e.code, e.read().decode("utf-8", "ignore")[:200]
     except Exception as e:
         return 0, str(e)
+
+
+_SHIFT_DB2APP = {"work_date": "date", "emp_type": "type",
+                 "start_time": "start", "end_time": "end"}
+
+
+def db_fetch_shifts():
+    """All planned shifts from Supabase as a SCHED_COLS DataFrame; None on error."""
+    code, text = _sb_request("shifts?select=*&order=work_date,location,shift", "GET")
+    if code != 200:
+        return None
+    try:
+        rows = json.loads(text)
+    except Exception:
+        return None
+    if not rows:
+        return pd.DataFrame(columns=SCHED_COLS)
+    df = pd.DataFrame(rows).rename(columns=_SHIFT_DB2APP)
+    for c in SCHED_COLS:
+        if c not in df.columns:
+            df[c] = ""
+    df["hours"] = pd.to_numeric(df["hours"], errors="coerce").fillna(0)
+    return df[SCHED_COLS].fillna("")
+
+
+def db_replace_shifts(df):
+    """Replace the whole shifts table with df (delete-all then bulk insert)."""
+    _sb_request("shifts?id=gt.0", "DELETE", extra_headers={"Prefer": "return=minimal"})
+    if df is None or df.empty:
+        return
+    recs = []
+    for _, r in df.iterrows():
+        recs.append({
+            "work_date": str(r["date"]), "day": str(r.get("day", "")),
+            "location": str(r["location"]), "shift": str(r["shift"]),
+            "employee": str(r["employee"]), "emp_type": str(r.get("type", "")),
+            "start_time": str(r.get("start", "")), "end_time": str(r.get("end", "")),
+            "hours": float(pd.to_numeric(r.get("hours", 0), errors="coerce") or 0),
+            "status": str(r.get("status", "")), "note": str(r.get("note", "")),
+        })
+    for i in range(0, len(recs), 200):
+        _sb_request("shifts", "POST", body=recs[i:i + 200],
+                    extra_headers={"Prefer": "return=minimal"})
 
 
 def db_upsert_checkin(rec):
