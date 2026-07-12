@@ -73,7 +73,7 @@ st.set_page_config(page_title="WeDrink Sabah — Shift Dashboard",
                    page_icon="🧋", layout="wide")
 
 # Build marker — bump when debugging deploys to confirm which code Cloud runs.
-APP_BUILD = "b10-2026-07-12"
+APP_BUILD = "b11-2026-07-12"
 
 DEFAULT_ADMIN_USER = "admin"
 DEFAULT_ADMIN_PW = "wedrink2026"
@@ -539,8 +539,11 @@ def todays_checkins():
 
 
 def checkin_map_html(checkins, sites, height=380):
-    """Leaflet map: branch geofences + a pin per checked-in staff at their branch."""
-    branches = [{"name": loc_label(loc), "lat": s["lat"], "lng": s["lng"],
+    """Leaflet map: branch geofences + a pin per checked-in staff.
+    When Supabase is configured, the map's own JS re-fetches today's check-ins
+    every 20s (browser-side, publishable key + RLS) — no Streamlit reruns, so
+    nothing can race the server. Live count shown as a chip on the map."""
+    branches = [{"key": loc, "name": loc_label(loc), "lat": s["lat"], "lng": s["lng"],
                  "radius": int(s.get("radius_m", 80))}
                 for loc, s in sites.items() if s.get("configured")]
     pins = []
@@ -555,7 +558,12 @@ def checkin_map_html(checkins, sites, height=380):
         pins.append({"name": c.get("employee", ""), "lat": float(lat), "lng": float(lng),
                      "branch": loc_label(br), "time": str(c.get("clock_in", ""))[11:16],
                      "late": int(c.get("minutes_late") or 0), "shift": c.get("shift", "")})
-    data = json.dumps({"branches": branches, "pins": pins})
+    sb_url, sb_key = _sb()
+    data = json.dumps({
+        "branches": branches, "pins": pins,
+        "sb": {"url": sb_url or "", "key": sb_key or "",
+               "today": now_myt().date().isoformat()},
+    })
     tmpl = """<!DOCTYPE html><html><head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
@@ -563,8 +571,11 @@ def checkin_map_html(checkins, sites, height=380):
 .lbl{background:rgba(20,26,33,.92);border:1px solid #37D7D0;color:#EAF3F1;font:600 11px system-ui;padding:1px 6px;border-radius:6px;white-space:nowrap}
 .blbl{background:rgba(12,26,32,.85);border:1px solid rgba(80,190,180,.5);color:#9fe6e0;font:700 11px system-ui;padding:2px 8px;border-radius:8px}
 #lg{position:absolute;left:10px;bottom:12px;z-index:1000;background:rgba(12,26,32,.92);border:1px solid rgba(80,190,180,.4);border-radius:10px;padding:8px 11px;font:600 11.5px system-ui;color:#EAF3F1;line-height:1.75;pointer-events:none;box-shadow:0 6px 18px rgba(0,0,0,.4)}
-#lg i{display:inline-block;width:11px;height:11px;border-radius:50%;margin-right:7px;vertical-align:middle}</style>
+#lg i{display:inline-block;width:11px;height:11px;border-radius:50%;margin-right:7px;vertical-align:middle}
+#cnt{position:absolute;right:10px;top:10px;z-index:1000;background:rgba(12,26,32,.94);border:1px solid rgba(80,190,180,.5);border-radius:999px;padding:7px 15px;font:700 13px system-ui;color:#EAF3F1;pointer-events:none;box-shadow:0 6px 18px rgba(0,0,0,.45)}
+#cnt b{color:#37D7D0;font-size:15px}</style>
 </head><body><div id="m"></div>
+<div id="cnt">✓ <b id="cn">0</b> checked in <span id="lv" style="color:#8AA6A0;font-weight:600"></span></div>
 <div id="lg">
   <div><i style="background:#2ec878"></i>On time</div>
   <div><i style="background:#F2A03D"></i>Late</div>
@@ -574,24 +585,55 @@ def checkin_map_html(checkins, sites, height=380):
 var D=__DATA__;
 var map=L.map('m',{scrollWheelZoom:false});
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'}).addTo(map);
-var pts=[];
+var basePts=[];
+var byName={};
 D.branches.forEach(function(b){
+  byName[b.name]=b; byName[b.key]=b;
   L.circle([b.lat,b.lng],{radius:b.radius,color:'#37D7D0',weight:1,fillColor:'#37D7D0',fillOpacity:.10}).addTo(map);
   L.marker([b.lat,b.lng],{opacity:0}).addTo(map).bindTooltip('📍 '+b.name,{permanent:true,direction:'right',offset:[6,0],className:'blbl'});
-  pts.push([b.lat,b.lng]);
+  basePts.push([b.lat,b.lng]);
 });
-var seen={};
-D.pins.forEach(function(p){
-  var key=p.lat.toFixed(5)+','+p.lng.toFixed(5); var n=(seen[key]=(seen[key]||0)+1)-1;
-  var off=n>0?0.00018:0, ang=n*1.05;
-  var la=p.lat+off*Math.cos(ang), ln=p.lng+off*Math.sin(ang);
-  var col=p.late>0?'#F2A03D':'#2ec878';
-  var m=L.circleMarker([la,ln],{radius:8,color:'#08131a',weight:2,fillColor:col,fillOpacity:.95}).addTo(map);
-  m.bindTooltip(p.name,{permanent:true,direction:'top',offset:[0,-7],className:'lbl'});
-  m.bindPopup('<b>'+p.name+'</b><br>'+p.branch+' · '+p.shift+'<br>🕒 '+p.time+(p.late>0?(' · ⏰ '+p.late+'m late'):' · ✅ on time'));
-  pts.push([la,ln]);
-});
-if(pts.length){map.fitBounds(pts,{padding:[40,40],maxZoom:16});}else{map.setView([5.95,116.08],12);}
+var pinLayer=L.layerGroup().addTo(map);
+var fitted=false;
+function draw(pins){
+  pinLayer.clearLayers();
+  var pts=basePts.slice(), seen={};
+  pins.forEach(function(p){
+    var key=p.lat.toFixed(5)+','+p.lng.toFixed(5); var n=(seen[key]=(seen[key]||0)+1)-1;
+    var off=n>0?0.00018:0, ang=n*1.05;
+    var la=p.lat+off*Math.cos(ang), ln=p.lng+off*Math.sin(ang);
+    var col=p.late>0?'#F2A03D':'#2ec878';
+    var m=L.circleMarker([la,ln],{radius:8,color:'#08131a',weight:2,fillColor:col,fillOpacity:.95}).addTo(pinLayer);
+    m.bindTooltip(p.name,{permanent:true,direction:'top',offset:[0,-7],className:'lbl'});
+    m.bindPopup('<b>'+p.name+'</b><br>'+p.branch+' · '+p.shift+'<br>🕒 '+p.time+(p.late>0?(' · ⏰ '+p.late+'m late'):' · ✅ on time'));
+    pts.push([la,ln]);
+  });
+  document.getElementById('cn').textContent=pins.length;
+  if(!fitted){
+    if(pts.length){map.fitBounds(pts,{padding:[40,40],maxZoom:16});}else{map.setView([5.95,116.08],12);}
+    fitted=true;
+  }
+}
+function rowToPin(r){
+  var lat=r.lat, lng=r.lng, b=byName[r.branch]||null;
+  if((lat==null||lng==null)){ if(!b) return null; lat=b.lat; lng=b.lng; }
+  return {name:r.employee, lat:lat, lng:lng, branch:(b?b.name:r.branch),
+          time:String(r.clock_in||'').slice(11,16), late:(r.minutes_late||0), shift:r.shift||''};
+}
+function refresh(){
+  if(!D.sb.url||!D.sb.key) return;
+  fetch(D.sb.url+'/rest/v1/check_ins?select=*&work_date=eq.'+D.sb.today,
+        {headers:{apikey:D.sb.key, Authorization:'Bearer '+D.sb.key}})
+    .then(function(r){return r.json();})
+    .then(function(rows){
+      if(!Array.isArray(rows)) return;
+      draw(rows.map(rowToPin).filter(Boolean));
+      var t=new Date();
+      document.getElementById('lv').textContent=' · '+('0'+t.getHours()).slice(-2)+':'+('0'+t.getMinutes()).slice(-2)+':'+('0'+t.getSeconds()).slice(-2);
+    }).catch(function(){});
+}
+draw(D.pins);
+if(D.sb.url&&D.sb.key){ refresh(); setInterval(refresh,20000); }
 setTimeout(function(){map.invalidateSize();},250);
 </script></body></html>"""
     return tmpl.replace("__DATA__", data)
@@ -1125,35 +1167,14 @@ def render_checkin_ui():
                "(phone browser will ask for location permission).")
 
 
-def _auto_fragment(fn):
-    """Wrap fn in a 20s auto-refresh fragment when supported, else return it
-    unchanged (keeps the app importable on older Streamlit)."""
-    frag = getattr(st, "fragment", None) or getattr(st, "experimental_fragment", None)
-    if frag is None:
-        return fn
-    try:
-        return frag(run_every=20)(fn)
-    except Exception:
-        try:
-            return frag(fn)
-        except Exception:
-            return fn
-
-
-@_auto_fragment
 def render_checkin_map():
-    """On-duty check-in map — reruns itself every 20s so late arrivals pop in.
-    Runs as a fragment (outside the page-level guard), so errors must be
-    caught here or they take down the whole app with an opaque 'Oh no'."""
-    try:
-        cks = todays_checkins()
-        n = len({(c["employee"], c.get("shift")) for c in cks})
-        st.markdown(f"##### 🗺️ Checked in today — {n} staff &nbsp;·&nbsp; 🔄 live")
-        components.html(checkin_map_html(cks, load_sites()), height=410)
-        st.caption("Map refreshes automatically every 20 seconds · tap a pin for name & time.")
-    except Exception as _e:
-        st.warning("Map couldn't refresh — it will retry automatically.")
-        st.exception(_e)
+    """On-duty check-in map. The refresh happens INSIDE the map iframe (its JS
+    polls Supabase every 20s with the publishable key) — no st.fragment, no
+    server reruns, so nothing can race Streamlit and crash the app."""
+    st.markdown("##### 🗺️ Checked in today &nbsp;·&nbsp; 🔄 live")
+    components.html(checkin_map_html(todays_checkins(), load_sites()), height=410)
+    st.caption("Count and pins update automatically every 20 seconds · "
+               "tap a pin for name & time.")
 
 
 def render_overall():
