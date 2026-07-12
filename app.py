@@ -73,7 +73,7 @@ st.set_page_config(page_title="WeDrink Sabah — Shift Dashboard",
                    page_icon="🧋", layout="wide")
 
 # Build marker — bump when debugging deploys to confirm which code Cloud runs.
-APP_BUILD = "b14-2026-07-12"
+APP_BUILD = "b15-2026-07-12"
 
 DEFAULT_ADMIN_USER = "admin"
 DEFAULT_ADMIN_PW = "wedrink2026"
@@ -1065,6 +1065,9 @@ def grid_html(sched, loc, who=None):
             ci = str(r.get("clock_in", "")).strip()
             ck = (f'<span class="wd-badge" style="background:rgba(46,200,120,.22);color:#67E0A3">'
                   f'✓ {ci[11:16] or ci}</span>') if ci else ""
+            keyb = ('<span class="wd-badge" title="Key holder" '
+                    'style="background:rgba(242,160,61,.22);color:#F2C070">🔑</span>'
+                    if "🔑" in str(r.get("note", "")) else "")
             nm = str(r["employee"]).strip()
             initials = (nm[0] + (nm[1] if len(nm) > 1 else "")).upper()
             chips += (f'<div class="wd-chip{me}" style="--sc:{col}">'
@@ -1072,7 +1075,7 @@ def grid_html(sched, loc, who=None):
                       f'<div class="wd-info">'
                       f'<div class="nm">{nm}'
                       f'<span class="wd-tag" style="background:{col}26;color:{col}">{r["shift"]}</span>'
-                      f'{pt}{pin}{ck}</div>'
+                      f'{pt}{pin}{keyb}{ck}</div>'
                       f'<div class="tm">{r["start"]}&ndash;{r["end"]}</div>'
                       f'</div></div>')
         body = chips if chips else '<div class="wd-empty">&mdash;</div>'
@@ -1246,6 +1249,39 @@ def render_checkin_map():
                "tap a pin for name & time.")
 
 
+def offday_board_html(off_map, dates):
+    """Overall 'who's on leave this week' table — one row per day."""
+    css = """<style>
+    .lv{width:100%;border-collapse:collapse;margin:4px 0 8px;
+      background:linear-gradient(165deg,rgba(22,44,52,.92),rgba(15,32,38,.92));
+      border:1px solid rgba(80,190,180,.18);border-radius:16px;overflow:hidden;
+      box-shadow:0 10px 28px rgba(0,0,0,.28);}
+    .lv td{padding:11px 14px;border-bottom:1px solid rgba(120,200,190,.1);vertical-align:middle;}
+    .lv tr:last-child td{border-bottom:none;}
+    .lv tr.wknd{background:rgba(242,160,61,.06);}
+    .lv-day{white-space:nowrap;color:#CFE3DE;font-weight:600;font-size:13px;width:132px;}
+    .lv-day .dw{color:#37D7D0;font-weight:800;}
+    .lv-day.wk .dw{color:#F2B96B;}
+    .lv-chip{display:inline-block;background:rgba(242,160,61,.2);color:#F2C070;
+      border:1px solid rgba(242,160,61,.32);border-radius:999px;padding:3px 12px;
+      margin:2px 5px 2px 0;font-size:12.5px;font-weight:700;}
+    .lv-none{color:#5B726C;font-size:12.5px;font-style:italic;}
+    </style>"""
+    body = ""
+    total = 0
+    for d in dates:
+        names = off_map.get(d.isoformat(), [])
+        total += len(names)
+        wk = " wknd" if d.weekday() >= 5 else ""
+        wkc = " wk" if d.weekday() >= 5 else ""
+        chips = ("".join(f"<span class='lv-chip'>🛌 {n}</span>" for n in names)
+                 if names else "<span class='lv-none'>— full team working —</span>")
+        body += (f"<tr class='{wk}'><td class='lv-day{wkc}'>"
+                 f"<span class='dw'>{d.strftime('%a')}</span> {d.strftime('%d %b')}</td>"
+                 f"<td>{chips}</td></tr>")
+    return css + f"<table class='lv'>{body}</table>", total
+
+
 def render_overall():
     sched = st.session_state.schedule
     st.subheader("🧋 WeDrink Sabah")
@@ -1262,6 +1298,14 @@ def render_overall():
         render_checkin_map()
         st.markdown(dashboard_html(sweek), unsafe_allow_html=True)
     elif mode.startswith("🗓️"):
+        # On-leave overview for the week (visible to everyone).
+        board, n_off = offday_board_html(config.get("off_days", {}), DATES)
+        with st.expander(f"🛌 On leave this week — {n_off} off-day request(s)",
+                         expanded=bool(n_off)):
+            st.markdown(board, unsafe_allow_html=True)
+            noff = config.get("no_off_members", [])
+            if noff:
+                st.caption("💪 Working all 7 days (requested no off): " + ", ".join(noff))
         if sweek.empty:
             st.info("No shifts for this week yet. Ask your Admin to create the schedule.")
         else:
@@ -1273,7 +1317,7 @@ def render_overall():
                     st.markdown(grid_html(sweek, loc), unsafe_allow_html=True)
                 else:
                     st.markdown(shift_board_html(sweek, loc), unsafe_allow_html=True)
-            st.caption("✓ = checked in · ⭐ = fixed request · ⏳ = part-timer · read-only view.")
+            st.caption("✓ = checked in · 🔑 = key holder · ⏳ = part-timer · read-only view.")
     else:
         who = st.selectbox("🔎 Choose your name to see your week",
                            ["— select —"] + list(employees["name"]))
