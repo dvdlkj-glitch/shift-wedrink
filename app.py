@@ -73,7 +73,7 @@ st.set_page_config(page_title="WeDrink Sabah — Shift Dashboard",
                    page_icon="🧋", layout="wide")
 
 # Build marker — bump when debugging deploys to confirm which code Cloud runs.
-APP_BUILD = "b13-2026-07-12"
+APP_BUILD = "b14-2026-07-12"
 
 DEFAULT_ADMIN_USER = "admin"
 DEFAULT_ADMIN_PW = "wedrink2026"
@@ -1884,8 +1884,9 @@ def render_admin():
 
         st.markdown("##### 📍 Branch check-in geofences (GPS)")
         st.caption("Stand at each branch, tap **Get my current GPS**, type the numbers into that "
-                   "branch's fields, set the radius (20 m = at the shop; raise it if staff "
-                   "get false 'too far' rejections indoors), then **Save**. Staff can only "
+                   "branch's fields, set the radius (30 m = at the shop with room for normal "
+                   "GPS drift; raise it if staff get false 'too far' rejections indoors), "
+                   "then **Save**. Staff can only "
                    "check in within this radius. Coordinates ship as placeholders — set the real "
                    "ones on-site before going live.")
         sites = load_sites()
