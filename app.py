@@ -73,7 +73,7 @@ st.set_page_config(page_title="WeDrink Sabah — Shift Dashboard",
                    page_icon="🧋", layout="wide")
 
 # Build marker — bump when debugging deploys to confirm which code Cloud runs.
-APP_BUILD = "b9-2026-07-12"
+APP_BUILD = "b10-2026-07-12"
 
 DEFAULT_ADMIN_USER = "admin"
 DEFAULT_ADMIN_PW = "wedrink2026"
@@ -702,17 +702,17 @@ def week_config_for(base, monday):
 try:
     employees = load_employees()
     base_config = load_config()
+    if "week_start_iso" not in st.session_state:
+        st.session_state.week_start_iso = base_config["week_start"]
+    _ws = datetime.strptime(st.session_state.week_start_iso, "%Y-%m-%d").date()
+    _ws = _ws - timedelta(days=_ws.weekday())
+    config = week_config_for(base_config, _ws)
+    DATES = sch.week_dates(config)
+    WEEK_ISO = [d.isoformat() for d in DATES]
 except Exception as _e:                          # show real error, never "Oh no"
     st.error(f"Failed to load roster/config (build {APP_BUILD}).")
     st.exception(_e)
     st.stop()
-if "week_start_iso" not in st.session_state:
-    st.session_state.week_start_iso = base_config["week_start"]
-_ws = datetime.strptime(st.session_state.week_start_iso, "%Y-%m-%d").date()
-_ws = _ws - timedelta(days=_ws.weekday())
-config = week_config_for(base_config, _ws)
-DATES = sch.week_dates(config)
-WEEK_ISO = [d.isoformat() for d in DATES]
 
 
 def eligible_locations(emp_name):
@@ -984,7 +984,11 @@ st.caption(
 )
 
 # Handle a GPS check-in redirect (?att=1…); runs here so all helpers are defined.
-process_checkin_qp()
+try:
+    process_checkin_qp()
+except Exception as _e:
+    st.error(f"Check-in processing failed (build {APP_BUILD}).")
+    st.exception(_e)
 
 # GPS check-in result (survives the check-in page reload via session_state).
 _ci_res = st.session_state.pop("checkin_result", None)
@@ -1138,12 +1142,18 @@ def _auto_fragment(fn):
 
 @_auto_fragment
 def render_checkin_map():
-    """On-duty check-in map — reruns itself every 20s so late arrivals pop in."""
-    cks = todays_checkins()
-    n = len({(c["employee"], c.get("shift")) for c in cks})
-    st.markdown(f"##### 🗺️ Checked in today — {n} staff &nbsp;·&nbsp; 🔄 live")
-    components.html(checkin_map_html(cks, load_sites()), height=410)
-    st.caption("Map refreshes automatically every 20 seconds · tap a pin for name & time.")
+    """On-duty check-in map — reruns itself every 20s so late arrivals pop in.
+    Runs as a fragment (outside the page-level guard), so errors must be
+    caught here or they take down the whole app with an opaque 'Oh no'."""
+    try:
+        cks = todays_checkins()
+        n = len({(c["employee"], c.get("shift")) for c in cks})
+        st.markdown(f"##### 🗺️ Checked in today — {n} staff &nbsp;·&nbsp; 🔄 live")
+        components.html(checkin_map_html(cks, load_sites()), height=410)
+        st.caption("Map refreshes automatically every 20 seconds · tap a pin for name & time.")
+    except Exception as _e:
+        st.warning("Map couldn't refresh — it will retry automatically.")
+        st.exception(_e)
 
 
 def render_overall():
