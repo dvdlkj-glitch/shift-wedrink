@@ -47,9 +47,9 @@ DEFAULT_EARLY_MIN = 15
 # each branch and capture the real centre (Setup ▸ Branch check-in geofences).
 # "configured": False disables staff check-in for that branch until it is set.
 DEFAULT_SITES = {
-    "Aeropod": {"lat": 5.9389, "lng": 116.0539, "radius_m": 80, "configured": False},
-    "Lintas":  {"lat": 5.9631, "lng": 116.0736, "radius_m": 80, "configured": False},
-    "Beverly": {"lat": 5.9436, "lng": 116.0895, "radius_m": 80, "configured": False},
+    "Aeropod": {"lat": 5.9389, "lng": 116.0539, "radius_m": 20, "configured": False},
+    "Lintas":  {"lat": 5.9631, "lng": 116.0736, "radius_m": 20, "configured": False},
+    "Beverly": {"lat": 5.9436, "lng": 116.0895, "radius_m": 20, "configured": False},
 }
 # Reject a fix this coarse — it's a WiFi/cell estimate, not real GPS (anti-spoof).
 MAX_ACCURACY_M = 150
@@ -73,7 +73,7 @@ st.set_page_config(page_title="WeDrink Sabah — Shift Dashboard",
                    page_icon="🧋", layout="wide")
 
 # Build marker — bump when debugging deploys to confirm which code Cloud runs.
-APP_BUILD = "b12-2026-07-12"
+APP_BUILD = "b13-2026-07-12"
 
 DEFAULT_ADMIN_USER = "admin"
 DEFAULT_ADMIN_PW = "wedrink2026"
@@ -191,7 +191,7 @@ def load_sites():
     for loc in config["locations"]:
         if loc not in d:
             d[loc] = dict(DEFAULT_SITES.get(
-                loc, {"lat": 5.98, "lng": 116.07, "radius_m": 80, "configured": False}))
+                loc, {"lat": 5.98, "lng": 116.07, "radius_m": 20, "configured": False}))
             changed = True
     if changed:
         try:
@@ -308,7 +308,7 @@ def geo_checkin_html(r, site, win_min, now_min):
         "start": str(r["start"]), "startMin": _min_of_day(r["start"]) or 0,
         "openMin": (_min_of_day(r["start"]) or 0) - int(win_min),
         "site": {"lat": float(site["lat"]), "lng": float(site["lng"]),
-                 "radius": float(site.get("radius_m", 80))},
+                 "radius": float(site.get("radius_m", 20))},
         "maxAcc": MAX_ACCURACY_M,
         "nowMin": int(now_min),          # server MYT minutes at render; JS adds elapsed
     })
@@ -610,8 +610,11 @@ def checkin_map_html(checkins, sites, height=380):
     every 20s (browser-side, publishable key + RLS) — no Streamlit reruns, so
     nothing can race the server. Live count shown as a chip on the map."""
     branches = [{"key": loc, "name": loc_label(loc), "lat": s["lat"], "lng": s["lng"],
-                 "radius": int(s.get("radius_m", 80))}
+                 "radius": int(s.get("radius_m", 20))}
                 for loc, s in sites.items() if s.get("configured")]
+    radii = sorted({b["radius"] for b in branches})
+    radius_lbl = (f"{radii[0]}&nbsp;m" if len(radii) == 1
+                  else f"{radii[0]}–{radii[-1]}&nbsp;m") if radii else "—"
     pins = []
     for c in checkins:
         br = c.get("branch")
@@ -645,7 +648,7 @@ def checkin_map_html(checkins, sites, height=380):
 <div id="lg">
   <div><i style="background:#2ec878"></i>On time</div>
   <div><i style="background:#F2A03D"></i>Late</div>
-  <div><i style="background:transparent;border:2px solid #37D7D0"></i>Branch · 80&nbsp;m</div>
+  <div><i style="background:transparent;border:2px solid #37D7D0"></i>Branch · __RADIUS__</div>
 </div>
 <script>
 var D=__DATA__;
@@ -702,7 +705,7 @@ draw(D.pins);
 if(D.sb.url&&D.sb.key){ refresh(); setInterval(refresh,20000); }
 setTimeout(function(){map.invalidateSize();},250);
 </script></body></html>"""
-    return tmpl.replace("__DATA__", data)
+    return tmpl.replace("__DATA__", data).replace("__RADIUS__", radius_lbl)
 
 
 def do_checkin(emp, lat, lng, acc):
@@ -739,7 +742,7 @@ def do_checkin(emp, lat, lng, acc):
         return {"ok": False, "msg": f"GPS signal too weak (±{round(acc)} m). Move outdoors or "
                                     "near a window and try again."}
     dist = haversine_m(lat, lng, site["lat"], site["lng"])
-    radius = float(site.get("radius_m", 80))
+    radius = float(site.get("radius_m", 20))
     if dist > radius:
         return {"ok": False, "msg": f"You're about {round(dist)} m from {loc_label(branch)} "
                                     f"(must be within {round(radius)} m). Move closer and retry."}
@@ -1216,7 +1219,7 @@ def render_checkin_ui():
     r = target
     branch = r["location"]
     site = load_sites().get(branch, {})
-    radius = int(site.get("radius_m", 80))
+    radius = int(site.get("radius_m", 20))
     if not site.get("configured"):
         st.error(f"Check-in for **{loc_label(branch)}** isn't set up yet. "
                  "Ask your admin to capture the branch location under **Admin ▸ Setup**.")
@@ -1881,7 +1884,8 @@ def render_admin():
 
         st.markdown("##### 📍 Branch check-in geofences (GPS)")
         st.caption("Stand at each branch, tap **Get my current GPS**, type the numbers into that "
-                   "branch's fields, set the radius (≈80 m), then **Save**. Staff can only "
+                   "branch's fields, set the radius (20 m = at the shop; raise it if staff "
+                   "get false 'too far' rejections indoors), then **Save**. Staff can only "
                    "check in within this radius. Coordinates ship as placeholders — set the real "
                    "ones on-site before going live.")
         sites = load_sites()
@@ -1895,8 +1899,8 @@ def render_admin():
                                      format="%.6f", key=f"slat_{loc}")
             lng = cc[1].number_input("Longitude", value=float(s.get("lng", 116.07)),
                                      format="%.6f", key=f"slng_{loc}")
-            rad = cc[2].number_input("Radius (m)", value=int(s.get("radius_m", 80)),
-                                     min_value=20, max_value=500, step=10, key=f"srad_{loc}")
+            rad = cc[2].number_input("Radius (m)", value=int(s.get("radius_m", 20)),
+                                     min_value=10, max_value=500, step=10, key=f"srad_{loc}")
             cc[3].markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
             if cc[3].button("💾 Save", key=f"ssave_{loc}"):
                 sites[loc] = {"lat": float(lat), "lng": float(lng),
