@@ -73,7 +73,7 @@ st.set_page_config(page_title="WeDrink Sabah — Shift Dashboard",
                    page_icon="🧋", layout="wide")
 
 # Build marker — bump when debugging deploys to confirm which code Cloud runs.
-APP_BUILD = "b11-2026-07-12"
+APP_BUILD = "b12-2026-07-12"
 
 DEFAULT_ADMIN_USER = "admin"
 DEFAULT_ADMIN_PW = "wedrink2026"
@@ -293,43 +293,109 @@ def pick_checkin_target(todays, now_min, window):
     return None, "empty", None
 
 
-def geo_checkin_html(emp, branch, radius_m):
-    """A big check-in button that captures GPS on a real tap (iOS-safe) and
-    hands lat/lng/accuracy back to Streamlit via a top-window query string.
-    Same Geolocation method as attendance-pro.html."""
-    emp_q = quote(str(emp))
-    return f"""
+def geo_checkin_html(r, site, win_min, now_min):
+    """Self-contained check-in button: captures GPS, validates geofence + time
+    window, and writes the record straight to Supabase — all inside the
+    component iframe. (Streamlit sandboxes components without
+    allow-top-navigation, so the old redirect-the-page approach silently did
+    nothing on real taps; direct REST from the iframe is the reliable path,
+    the same one the live map uses.) Late check-ins always allowed."""
+    url, key = _sb()
+    ctx = json.dumps({
+        "sb": {"url": url or "", "key": key or ""},
+        "emp": str(r["employee"]), "date": str(r["date"]), "shift": str(r["shift"]),
+        "branch": str(r["location"]), "branchLabel": loc_label(r["location"]),
+        "start": str(r["start"]), "startMin": _min_of_day(r["start"]) or 0,
+        "openMin": (_min_of_day(r["start"]) or 0) - int(win_min),
+        "site": {"lat": float(site["lat"]), "lng": float(site["lng"]),
+                 "radius": float(site.get("radius_m", 80))},
+        "maxAcc": MAX_ACCURACY_M,
+        "nowMin": int(now_min),          # server MYT minutes at render; JS adds elapsed
+    })
+    tmpl = """
 <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif">
   <button id="gbtn" style="width:100%;min-height:58px;border:none;border-radius:14px;
     font-size:17px;font-weight:700;color:#06231f;cursor:pointer;
     background:linear-gradient(135deg,#37D7D0,#1C9C96);box-shadow:0 8px 22px rgba(55,215,208,.35)">
     📍 Check in now
   </button>
-  <div id="gmsg" style="margin-top:10px;font-size:13px;color:#8AA6A0;min-height:18px"></div>
+  <div id="gmsg" style="margin-top:10px;font-size:14px;color:#8AA6A0;min-height:20px;line-height:1.5"></div>
 </div>
 <script>
-(function(){{
+(function(){
+  var C=__CTX__;
+  var t0=Date.now();
   var b=document.getElementById('gbtn'), m=document.getElementById('gmsg');
-  b.onclick=function(){{
-    if(!navigator.geolocation){{m.textContent='This device does not support GPS.';return;}}
-    b.disabled=true; b.style.opacity=.6; m.textContent='Getting your location…';
-    navigator.geolocation.getCurrentPosition(function(pos){{
-      var lat=pos.coords.latitude.toFixed(6),
-          lng=pos.coords.longitude.toFixed(6),
+  function nowMin(){ return C.nowMin + (Date.now()-t0)/60000; }
+  function hhmm(mins){ mins=Math.max(0,Math.round(mins))%1440;
+    return ('0'+Math.floor(mins/60)).slice(-2)+':'+('0'+(mins%60)).slice(-2); }
+  function hav(a,b,c,d){ var R=6371000,p=Math.PI/180;
+    var x=Math.sin((c-a)*p/2), y=Math.sin((d-b)*p/2);
+    var h=x*x+Math.cos(a*p)*Math.cos(c*p)*y*y;
+    return 2*R*Math.asin(Math.sqrt(h)); }
+  function ok(html){ m.style.color='#67E0A3'; m.innerHTML=html; }
+  function bad(html){ m.style.color='#F2A0A0'; m.innerHTML=html;
+    b.disabled=false; b.style.opacity=1; }
+  function hdrs(){ return {apikey:C.sb.key, Authorization:'Bearer '+C.sb.key,
+                          'Content-Type':'application/json'}; }
+  var qs='work_date=eq.'+C.date+'&employee=eq.'+encodeURIComponent(C.emp)+
+         '&shift=eq.'+encodeURIComponent(C.shift);
+  b.onclick=function(){
+    if(!C.sb.url||!C.sb.key){ bad('Check-in storage is not configured — tell your admin.'); return; }
+    if(!navigator.geolocation){ bad('This device does not support GPS.'); return; }
+    b.disabled=true; b.style.opacity=.6;
+    m.style.color='#8AA6A0'; m.textContent='Getting your location…';
+    navigator.geolocation.getCurrentPosition(function(pos){
+      var lat=pos.coords.latitude, lng=pos.coords.longitude,
           acc=Math.round(pos.coords.accuracy);
-      var q='?att=1&emp={emp_q}&lat='+lat+'&lng='+lng+'&acc='+acc+'&t='+Date.now();
-      try{{ window.top.location.search=q; }}catch(e){{ window.location.search=q; }}
-    }}, function(err){{
-      b.disabled=false; b.style.opacity=1;
-      var t={{1:'Location permission denied — allow it in your browser and retry.',
-              2:'Position unavailable — move outdoors / near a window.',
-              3:'Timed out — please try again.'}};
-      m.textContent=t[err.code]||('Location error: '+err.message);
-    }}, {{enableHighAccuracy:true, timeout:12000, maximumAge:0}});
-  }};
-}})();
+      if(acc>C.maxAcc){ bad('GPS signal too weak (±'+acc+' m). Move outdoors or near a window and try again.'); return; }
+      var dist=Math.round(hav(lat,lng,C.site.lat,C.site.lng));
+      if(dist>C.site.radius){ bad('You are about '+dist+' m from '+C.branchLabel+
+        ' (must be within '+Math.round(C.site.radius)+' m). Move closer and retry.'); return; }
+      var nm=nowMin();
+      if(nm<C.openMin){ bad('Too early — check-in for your '+C.shift+' shift ('+C.start+
+        ') opens at '+hhmm(C.openMin)+'. Come back then.'); return; }
+      var late=Math.max(0,Math.round(nm-C.startMin));
+      var stamp=C.date+' '+hhmm(nm);
+      m.textContent='Saving your check-in…';
+      // already checked in?
+      fetch(C.sb.url+'/rest/v1/check_ins?select=clock_in&'+qs,{headers:hdrs()})
+      .then(function(r){return r.json();})
+      .then(function(rows){
+        if(Array.isArray(rows)&&rows.length){
+          ok('✓ You are already checked in today at <b>'+rows[0].clock_in+'</b>.');
+          return null;
+        }
+        return fetch(C.sb.url+'/rest/v1/check_ins?on_conflict=work_date,employee,shift',{
+          method:'POST',
+          headers:Object.assign(hdrs(),{Prefer:'resolution=ignore-duplicates,return=minimal'}),
+          body:JSON.stringify([{work_date:C.date, employee:C.emp, branch:C.branch,
+            shift:C.shift, shift_start:C.start, clock_in:stamp,
+            lat:+lat.toFixed(6), lng:+lng.toFixed(6), accuracy_m:acc,
+            distance_m:dist, minutes_late:late}])
+        }).then(function(resp){
+          if(resp.status===201||resp.status===200||resp.status===204){
+            ok('✓ <b>'+C.emp+'</b> checked in at <b>'+stamp+'</b> · '+C.branchLabel+' · '+
+               C.shift+' shift · '+(late>0?('⏰ '+late+' min late'):'✅ on time')+
+               ' · '+dist+' m from the shop.<br><span style="color:#8AA6A0">Saved. '+
+               'It will show on the On-Duty map within ~20 seconds.</span>');
+          } else {
+            resp.text().then(function(t){ bad('Could not save — please try again. ('+resp.status+')'); });
+          }
+        });
+      })
+      .catch(function(e){ bad('Network problem while saving — check your connection and tap again.'); });
+    }, function(err){
+      var t={1:'Location permission denied — allow location for this site and retry.',
+             2:'Position unavailable — move outdoors / near a window.',
+             3:'Timed out — please try again.'};
+      bad(t[err.code]||('Location error: '+err.message));
+    }, {enableHighAccuracy:true, timeout:12000, maximumAge:0});
+  };
+})();
 </script>
 """
+    return tmpl.replace("__CTX__", ctx)
 
 
 def geo_show_html():
@@ -1161,7 +1227,7 @@ def render_checkin_ui():
                  "late check-in." if late > 0 else "")
     st.markdown(f"**Checking in to {loc_label(branch)} — {SHIFT_ICON.get(r['shift'],'')} "
                 f"{r['shift']} shift.** You must be within **{radius} m** of the shop.{late_note}")
-    components.html(geo_checkin_html(who, branch, radius), height=110)
+    components.html(geo_checkin_html(r, site, win, now_min), height=160)
     st.caption("Your location is captured only when you tap the button, and only used to "
                "confirm you're at the branch. Works on the deployed https:// link "
                "(phone browser will ask for location permission).")
