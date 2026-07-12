@@ -72,6 +72,9 @@ LOC_EMOJI = {"Aeropod": "✈️", "Lintas": "🛍️", "Beverly": "🏙️"}
 st.set_page_config(page_title="WeDrink Sabah — Shift Dashboard",
                    page_icon="🧋", layout="wide")
 
+# Build marker — bump when debugging deploys to confirm which code Cloud runs.
+APP_BUILD = "b9-2026-07-12"
+
 DEFAULT_ADMIN_USER = "admin"
 DEFAULT_ADMIN_PW = "wedrink2026"
 
@@ -673,7 +676,12 @@ def process_checkin_qp():
 
 
 if "schedule" not in st.session_state:
-    st.session_state.schedule = load_schedule()
+    try:
+        st.session_state.schedule = load_schedule()
+    except Exception as _e:                      # show real error, never "Oh no"
+        st.error(f"Failed to load the schedule (build {APP_BUILD}).")
+        st.exception(_e)
+        st.session_state.schedule = pd.DataFrame(columns=SCHED_COLS)
 if "is_admin" not in st.session_state:
     st.session_state.is_admin = False
 
@@ -691,8 +699,13 @@ def week_config_for(base, monday):
     return wk
 
 
-employees = load_employees()
-base_config = load_config()
+try:
+    employees = load_employees()
+    base_config = load_config()
+except Exception as _e:                          # show real error, never "Oh no"
+    st.error(f"Failed to load roster/config (build {APP_BUILD}).")
+    st.exception(_e)
+    st.stop()
 if "week_start_iso" not in st.session_state:
     st.session_state.week_start_iso = base_config["week_start"]
 _ws = datetime.strptime(st.session_state.week_start_iso, "%Y-%m-%d").date()
@@ -1856,14 +1869,19 @@ def render_login_gate():
         render_overall()
 
 
-if view_mode == "🔐 Admin" and IS_ADMIN:
-    render_admin()
-elif view_mode == "🔐 Admin" and not IS_ADMIN:
-    render_login_gate()
-else:
-    render_overall()
+try:
+    if view_mode == "🔐 Admin" and IS_ADMIN:
+        render_admin()
+    elif view_mode == "🔐 Admin" and not IS_ADMIN:
+        render_login_gate()
+    else:
+        render_overall()
+except Exception as _e:                          # show real error, never "Oh no"
+    st.error(f"This page hit an error (build {APP_BUILD}) — details below. "
+             "Other pages still work; please screenshot this for the admin.")
+    st.exception(_e)
 
 st.markdown(
     "<div style='text-align:center;color:#9BB0AA;font-size:12px;padding:22px 0 8px;'>"
-    "🧋 WeDrink Sabah · Shift Dashboard — Aeropod · Lintas Plaza · Beverly Hills"
+    f"🧋 WeDrink Sabah · Shift Dashboard — Aeropod · Lintas Plaza · Beverly Hills · {APP_BUILD}"
     "</div>", unsafe_allow_html=True)
