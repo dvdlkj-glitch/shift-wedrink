@@ -1722,14 +1722,28 @@ def render_admin():
         with colA:
             st.markdown("##### 🛌 Off-day applications")
             off = config.get("off_days", {})
-            st.table(pd.DataFrame([{"Date": k, "Off": ", ".join(v)} for k, v in off.items()]))
-            st.caption("No-off members: " + ", ".join(config.get("no_off_members", [])))
+            if off:
+                st.table(pd.DataFrame([{"Date": k, "Off": ", ".join(v)} for k, v in off.items()]))
+            else:
+                st.caption("No off-day applications this week.")
+            st.caption("No-off members: " + (", ".join(config.get("no_off_members", [])) or "—"))
         with colB:
             st.markdown("##### 📌 Shift requests")
-            st.table(pd.DataFrame(config.get("shift_requests", []))[
-                ["name", "date", "shift", "hard", "note"]])
+            reqs = config.get("shift_requests", [])
+            if reqs:
+                rq = pd.DataFrame(reqs)
+                for c in ["name", "date", "shift", "hard", "note"]:
+                    if c not in rq.columns:
+                        rq[c] = ""
+                st.table(rq[["name", "date", "shift", "hard", "note"]])
+            else:
+                st.caption("No shift requests this week.")
         st.markdown("##### 🕒 Part-time availability")
-        st.table(pd.DataFrame(config.get("part_availability", {})).T)
+        pa = config.get("part_availability", {})
+        if pa:
+            st.table(pd.DataFrame(pa).T)
+        else:
+            st.caption("No part-time availability set for this week.")
         st.markdown("##### 🗄️ Check-in storage")
         if db_enabled():
             st.success("🟢 **Supabase connected** — staff check-ins are saved to the cloud "
