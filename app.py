@@ -73,7 +73,7 @@ st.set_page_config(page_title="WeDrink Sabah — Shift Dashboard",
                    page_icon="🧋", layout="wide")
 
 # Build marker — bump when debugging deploys to confirm which code Cloud runs.
-APP_BUILD = "b15-2026-07-12"
+APP_BUILD = "b16-2026-07-13"
 
 DEFAULT_ADMIN_USER = "admin"
 DEFAULT_ADMIN_PW = "wedrink2026"
@@ -664,24 +664,51 @@ D.branches.forEach(function(b){
 });
 var pinLayer=L.layerGroup().addTo(map);
 var fitted=false;
+var spreadGroups=[];   // same-branch pins fanned out in PIXEL space (display only)
+function placeSpread(){
+  if(!map._loaded) return;   // projection needs an initial view
+  spreadGroups.forEach(function(g){
+    var cp=map.latLngToLayerPoint(L.latLng(g.center[0], g.center[1]));
+    var R=22;   // px ring — constant on-screen separation at any zoom
+    g.markers.forEach(function(m,i){
+      var ang=-Math.PI/2 + i*2*Math.PI/g.markers.length;
+      m.setLatLng(map.layerPointToLatLng(
+        L.point(cp.x+R*Math.cos(ang), cp.y+R*Math.sin(ang))));
+    });
+  });
+}
+map.on('zoomend', placeSpread);
+function mkPin(p, la, ln){
+  var col=p.late>0?'#F2A03D':'#2ec878';
+  var m=L.circleMarker([la,ln],{radius:8,color:'#08131a',weight:2,fillColor:col,fillOpacity:.95}).addTo(pinLayer);
+  m.bindTooltip(p.name,{permanent:true,direction:'top',offset:[0,-7],className:'lbl'});
+  m.bindPopup('<b>'+p.name+'</b><br>'+p.branch+' · '+p.shift+'<br>🕒 '+p.time+(p.late>0?(' · ⏰ '+p.late+'m late'):' · ✅ on time'));
+  return m;
+}
 function draw(pins){
   pinLayer.clearLayers();
-  var pts=basePts.slice(), seen={};
-  pins.forEach(function(p){
-    var key=p.lat.toFixed(5)+','+p.lng.toFixed(5); var n=(seen[key]=(seen[key]||0)+1)-1;
-    var off=n>0?0.00018:0, ang=n*1.05;
-    var la=p.lat+off*Math.cos(ang), ln=p.lng+off*Math.sin(ang);
-    var col=p.late>0?'#F2A03D':'#2ec878';
-    var m=L.circleMarker([la,ln],{radius:8,color:'#08131a',weight:2,fillColor:col,fillOpacity:.95}).addTo(pinLayer);
-    m.bindTooltip(p.name,{permanent:true,direction:'top',offset:[0,-7],className:'lbl'});
-    m.bindPopup('<b>'+p.name+'</b><br>'+p.branch+' · '+p.shift+'<br>🕒 '+p.time+(p.late>0?(' · ⏰ '+p.late+'m late'):' · ✅ on time'));
-    pts.push([la,ln]);
+  spreadGroups=[];
+  var pts=basePts.slice();
+  var groups={};
+  pins.forEach(function(p){ (groups[p.branch]=groups[p.branch]||[]).push(p); });
+  Object.keys(groups).forEach(function(gk){
+    var arr=groups[gk];
+    if(arr.length===1){
+      var p=arr[0]; mkPin(p, p.lat, p.lng); pts.push([p.lat,p.lng]); return;
+    }
+    var cla=0, cln=0;
+    arr.forEach(function(p){ cla+=p.lat; cln+=p.lng; });
+    cla/=arr.length; cln/=arr.length;
+    var ms=arr.map(function(p){ return mkPin(p, cla, cln); });
+    spreadGroups.push({center:[cla,cln], markers:ms});
+    pts.push([cla,cln]);
   });
   document.getElementById('cn').textContent=pins.length;
   if(!fitted){
     if(pts.length){map.fitBounds(pts,{padding:[40,40],maxZoom:16});}else{map.setView([5.95,116.08],12);}
     fitted=true;
   }
+  placeSpread();   // after the view exists; zoomend re-places on any zoom
 }
 function rowToPin(r){
   var lat=r.lat, lng=r.lng, b=byName[r.branch]||null;
