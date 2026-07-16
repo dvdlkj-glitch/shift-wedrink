@@ -73,7 +73,7 @@ st.set_page_config(page_title="WeDrink Sabah — Shift Dashboard",
                    page_icon="🧋", layout="wide")
 
 # Build marker — bump when debugging deploys to confirm which code Cloud runs.
-APP_BUILD = "b16-2026-07-13"
+APP_BUILD = "b17-2026-07-15"
 
 DEFAULT_ADMIN_USER = "admin"
 DEFAULT_ADMIN_PW = "wedrink2026"
@@ -1309,11 +1309,95 @@ def offday_board_html(off_map, dates):
     return css + f"<table class='lv'>{body}</table>", total
 
 
+def attendance_html(sweek, dates):
+    """Week attendance matrix: staff x day — on time / late(+min) / missed /
+    upcoming, built from the schedule and the durable check-in records."""
+    today = now_myt().date()
+    cks = db_fetch_checkins(tuple(d.isoformat() for d in dates)) if db_enabled() else []
+    idx = {(c["employee"], str(c["work_date"]), c["shift"]): c for c in cks}
+    staff = sorted(sweek["employee"].unique(),
+                   key=lambda n: (emp_type(n) != "full", n))
+    css = """<style>
+    .at{background:linear-gradient(165deg,rgba(22,44,52,.92),rgba(15,32,38,.92));
+      border:1px solid rgba(80,190,180,.18);border-radius:18px;padding:14px 16px;margin:6px 0 14px;
+      box-shadow:0 10px 28px rgba(0,0,0,.3);overflow-x:auto;-webkit-overflow-scrolling:touch;}
+    .at-grid{display:grid;grid-template-columns:112px repeat(7,minmax(86px,1fr));gap:6px;min-width:740px;}
+    .at-dh{text-align:center;padding:7px 2px;border-radius:10px;background:rgba(55,215,208,.10);
+      font-size:11px;font-weight:800;color:#37D7D0;text-transform:uppercase;}
+    .at-dh.wknd{background:rgba(242,160,61,.14);color:#F2B96B;}
+    .at-dh.today{outline:2px solid rgba(55,215,208,.55);}
+    .at-dh b{display:block;font-family:'JetBrains Mono',monospace;font-size:15px;color:#fff;}
+    .at-nm{display:flex;align-items:center;gap:7px;font-weight:700;font-size:12.5px;color:#EAF3F1;padding:0 4px;}
+    .at-av{flex:0 0 auto;width:26px;height:26px;border-radius:8px;background:linear-gradient(135deg,#37D7D0,#1C9C96);
+      color:#06231f;font-weight:800;font-size:11px;display:flex;align-items:center;justify-content:center;}
+    .at-c{border-radius:11px;min-height:44px;display:flex;flex-direction:column;align-items:center;
+      justify-content:center;gap:1px;font-size:11px;font-weight:700;padding:5px 2px;text-align:center;}
+    .at-c small{font-family:'JetBrains Mono',monospace;font-size:11.5px;font-weight:700;}
+    .at-ok{background:rgba(46,200,120,.16);border:1px solid rgba(46,200,120,.3);color:#67E0A3;}
+    .at-late{background:rgba(242,160,61,.15);border:1px solid rgba(242,160,61,.32);color:#F2C070;}
+    .at-miss{background:rgba(226,91,77,.13);border:1px solid rgba(226,91,77,.3);color:#F0938A;}
+    .at-wait{background:rgba(255,255,255,.03);border:1px dashed rgba(120,200,190,.18);color:#5F776F;}
+    .at-rest{background:transparent;border:none;color:#37504A;font-size:16px;}
+    .at-kpis{display:flex;gap:10px;flex-wrap:wrap;margin:2px 0 12px;}
+    .at-kpi{background:rgba(255,255,255,.05);border:1px solid rgba(80,190,180,.16);border-radius:13px;
+      padding:8px 16px;text-align:center;min-width:86px;}
+    .at-kpi .v{font-family:'JetBrains Mono',monospace;font-weight:700;font-size:20px;line-height:1;}
+    .at-kpi .l{font-size:10px;color:#8AA6A0;text-transform:uppercase;letter-spacing:.5px;margin-top:4px;}
+    </style>"""
+    n_ok = n_late = n_miss = n_wait = 0
+    hdr = "<div class='at-nm'></div>"
+    for d in dates:
+        cls = " wknd" if d.weekday() >= 5 else ""
+        cls += " today" if d == today else ""
+        hdr += f"<div class='at-dh{cls}'>{d.strftime('%a')}<b>{d.strftime('%d')}</b></div>"
+    rows = ""
+    for nm in staff:
+        initials = (nm[0] + (nm[1] if len(nm) > 1 else "")).upper()
+        rows += (f"<div class='at-nm'><span class='at-av'>{initials}</span>{nm}"
+                 f"{' ⏳' if emp_type(nm) == 'part' else ''}</div>")
+        mine = sweek[sweek.employee == nm]
+        for d in dates:
+            diso = d.isoformat()
+            day_shifts = mine[mine.date == diso].sort_values("start")
+            if day_shifts.empty:
+                rows += "<div class='at-c at-rest'>·</div>"
+                continue
+            cells = []
+            for _, r in day_shifts.iterrows():
+                c = idx.get((nm, diso, r["shift"]))
+                if c:
+                    late = int(c.get("minutes_late") or 0)
+                    t = str(c.get("clock_in", ""))[11:16]
+                    if late > 0:
+                        cells.append(("late", f"⏰<small>{t}</small>+{late}m"))
+                    else:
+                        cells.append(("ok", f"✓<small>{t}</small>on time"))
+                elif d < today:
+                    cells.append(("miss", f"✗<small>{r['start']}</small>no check-in"))
+                else:
+                    cells.append(("wait", f"·<small>{r['start']}</small>upcoming"))
+            for k, _ in cells:
+                n_ok += k == "ok"; n_late += k == "late"
+                n_miss += k == "miss"; n_wait += k == "wait"
+            kind = cells[0][0]
+            inner = "<br>".join(x[1] for x in cells) if len(cells) > 1 else cells[0][1]
+            rows += f"<div class='at-c at-{kind}'>{inner}</div>"
+    done = n_ok + n_late
+    kpis = (f"<div class='at-kpis'>"
+            f"<div class='at-kpi'><div class='v' style='color:#37D7D0'>{done}</div><div class='l'>Checked in</div></div>"
+            f"<div class='at-kpi'><div class='v' style='color:#67E0A3'>{n_ok}</div><div class='l'>On time</div></div>"
+            f"<div class='at-kpi'><div class='v' style='color:#F2C070'>{n_late}</div><div class='l'>Late</div></div>"
+            f"<div class='at-kpi'><div class='v' style='color:#F0938A'>{n_miss}</div><div class='l'>No check-in</div></div>"
+            f"<div class='at-kpi'><div class='v' style='color:#8AA6A0'>{n_wait}</div><div class='l'>Upcoming</div></div>"
+            f"</div>")
+    return css + kpis + f"<div class='at'><div class='at-grid'>{hdr}{rows}</div></div>"
+
+
 def render_overall():
     sched = st.session_state.schedule
     st.subheader("🧋 WeDrink Sabah")
     mode = st.radio("view", ["🟢 Check In", "📊 On Duty",
-                             "🗓️ Schedule", "🙋 My Shifts"],
+                             "🗓️ Schedule", "✅ Attendance", "🙋 My Shifts"],
                     horizontal=True, label_visibility="collapsed")
     if mode.startswith("🟢"):
         # Check-in is a today-only action — no week navigation needed.
@@ -1345,6 +1429,15 @@ def render_overall():
                 else:
                     st.markdown(shift_board_html(sweek, loc), unsafe_allow_html=True)
             st.caption("✓ = checked in · 🔑 = key holder · ⏳ = part-timer · read-only view.")
+    elif mode.startswith("✅"):
+        st.markdown("#### ✅ Attendance — check-in history for this week")
+        if sweek.empty:
+            st.info("No shifts scheduled for this week, so there is no attendance to show.")
+        else:
+            st.markdown(attendance_html(sweek, DATES), unsafe_allow_html=True)
+            st.caption("✓ green = on time · ⏰ amber = late (+minutes) · ✗ red = no check-in "
+                       "(past days) · dashed = shift not started yet · ⏳ = part-timer. "
+                       "Times are actual GPS check-ins recorded at the shop.")
     else:
         who = st.selectbox("🔎 Choose your name to see your week",
                            ["— select —"] + list(employees["name"]))
