@@ -73,7 +73,7 @@ st.set_page_config(page_title="WeDrink Sabah — Shift Dashboard",
                    page_icon="🧋", layout="wide")
 
 # Build marker — bump when debugging deploys to confirm which code Cloud runs.
-APP_BUILD = "b17-2026-07-15"
+APP_BUILD = "b18-2026-07-15"
 
 DEFAULT_ADMIN_USER = "admin"
 DEFAULT_ADMIN_PW = "wedrink2026"
@@ -1393,6 +1393,95 @@ def attendance_html(sweek, dates):
     return css + kpis + f"<div class='at'><div class='at-grid'>{hdr}{rows}</div></div>"
 
 
+RACE_VEHICLES = ["🏎️", "🚗", "🚙", "🛻", "🚕", "🏍️", "🛵", "🚌", "🚐", "🚜",
+                 "🛺", "🚓", "🚲", "🛴"]
+
+
+def race_html(sweek, dates):
+    """🏁 Punctuality Grand Prix — friendly weekly race built from check-ins.
+    Every on-time check-in pushes a racer forward; late = time in the pits."""
+    cks = db_fetch_checkins(tuple(d.isoformat() for d in dates)) if db_enabled() else []
+    stats = {}
+    for c in cks:
+        s = stats.setdefault(c["employee"], {"ok": 0, "late": 0, "mins": 0})
+        if int(c.get("minutes_late") or 0) > 0:
+            s["late"] += 1
+            s["mins"] += int(c["minutes_late"])
+        else:
+            s["ok"] += 1
+    css = """<style>
+    .gp{background:linear-gradient(165deg,rgba(22,44,52,.94),rgba(15,32,38,.94));
+      border:1px solid rgba(80,190,180,.2);border-radius:18px;padding:16px 18px;margin:14px 0 6px;
+      box-shadow:0 12px 30px rgba(0,0,0,.32);}
+    .gp-h{font-family:'Baloo 2',cursive;font-weight:800;font-size:19px;color:#EAF3F1;margin-bottom:2px;}
+    .gp-sub{color:#8AA6A0;font-size:12px;margin-bottom:14px;}
+    .gp-pod{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px;}
+    .gp-card{flex:1;min-width:150px;border-radius:14px;padding:11px 14px;border:1px solid;}
+    .gp-card .t{font-size:10.5px;font-weight:800;text-transform:uppercase;letter-spacing:.7px;}
+    .gp-card .n{font-family:'Baloo 2',cursive;font-weight:800;font-size:19px;color:#fff;margin-top:3px;}
+    .gp-card .d{font-size:11.5px;margin-top:2px;}
+    .gp-gold{background:rgba(255,204,84,.12);border-color:rgba(255,204,84,.45);}
+    .gp-gold .t,.gp-gold .d{color:#FFD778;}
+    .gp-silv{background:rgba(200,214,222,.10);border-color:rgba(200,214,222,.38);}
+    .gp-silv .t,.gp-silv .d{color:#CFDDE4;}
+    .gp-brz{background:rgba(222,148,90,.10);border-color:rgba(222,148,90,.4);}
+    .gp-brz .t,.gp-brz .d{color:#E8AE85;}
+    .gp-pit{background:rgba(242,160,61,.09);border-color:rgba(242,160,61,.3);}
+    .gp-pit .t,.gp-pit .d{color:#F2C070;}
+    .gp-row{display:flex;align-items:center;gap:9px;margin:7px 0;}
+    .gp-nm{flex:0 0 74px;font-weight:700;font-size:12px;color:#DFEDEA;text-align:right;}
+    .gp-track{flex:1;position:relative;height:30px;background:
+      repeating-linear-gradient(90deg,rgba(255,255,255,.045) 0 26px,rgba(255,255,255,.015) 26px 52px);
+      border:1px solid rgba(120,200,190,.12);border-radius:999px;overflow:hidden;}
+    .gp-track::after{content:'🏁';position:absolute;right:7px;top:4px;font-size:14px;opacity:.75;}
+    .gp-run{position:absolute;left:0;top:0;height:100%;display:flex;align-items:center;
+      justify-content:flex-end;font-size:19px;
+      background:linear-gradient(90deg,rgba(55,215,208,.05),rgba(55,215,208,.16));
+      border-radius:999px;transition:width .6s ease;}
+    .gp-sc{flex:0 0 auto;font-family:'JetBrains Mono',monospace;font-size:11.5px;font-weight:700;
+      color:#8AA6A0;min-width:88px;}
+    .gp-sc b{color:#67E0A3;} .gp-sc i{color:#F2C070;font-style:normal;}
+    .gp-grid{color:#5F776F;font-size:12px;margin-top:10px;}
+    </style>"""
+    if not stats:
+        return css + ("<div class='gp'><div class='gp-h'>🏁 Punctuality Grand Prix</div>"
+                      "<div class='gp-sub'>The race starts with this week's first "
+                      "check-in — lights out and away we go! 🚦</div></div>")
+    rank = sorted(stats.items(), key=lambda kv: (-kv[1]["ok"], kv[1]["mins"], kv[0]))
+    podium = ""
+    medals = [("gp-gold", "🥇 Pole Position"), ("gp-silv", "🥈 Front Row"),
+              ("gp-brz", "🥉 Podium")]
+    for (cls, title), (nm, s) in zip(medals, [r for r in rank if r[1]["ok"] > 0][:3]):
+        d = f"{s['ok']} on-time" + (f" · {s['mins']}m in the pits" if s["mins"] else " · clean laps")
+        podium += (f"<div class='gp-card {cls}'><div class='t'>{title}</div>"
+                   f"<div class='n'>{nm}</div><div class='d'>{d}</div></div>")
+    pits = sorted([r for r in rank if r[1]["mins"] > 0], key=lambda kv: -kv[1]["mins"])[:1]
+    for nm, s in pits:
+        podium += (f"<div class='gp-card gp-pit'><div class='t'>⛽ Longest Pit Stop</div>"
+                   f"<div class='n'>{nm}</div><div class='d'>{s['mins']} min in the pits — "
+                   f"fresh tyres, comeback loading 🔧</div></div>")
+    vehicles = {nm: RACE_VEHICLES[i % len(RACE_VEHICLES)]
+                for i, nm in enumerate(sorted(sweek["employee"].unique()))}
+    max_ok = max(s["ok"] for s in stats.values()) or 1
+    track = ""
+    for nm, s in rank:
+        pct = max(10, round(100 * s["ok"] / max_ok)) if s["ok"] else 8
+        sc = f"<b>{s['ok']}✓</b>"
+        if s["late"]:
+            sc += f" <i>{s['late']}⏰+{s['mins']}m</i>"
+        track += (f"<div class='gp-row'><div class='gp-nm'>{nm}</div>"
+                  f"<div class='gp-track'><div class='gp-run' style='width:{pct}%'>"
+                  f"{vehicles.get(nm, '🚗')}</div></div>"
+                  f"<div class='gp-sc'>{sc}</div></div>")
+    on_grid = sorted(set(sweek["employee"].unique()) - set(stats))
+    grid = (f"<div class='gp-grid'>🚦 Still on the starting grid: "
+            f"{', '.join(f'{vehicles.get(n)} {n}' for n in on_grid)}</div>" if on_grid else "")
+    return css + (f"<div class='gp'><div class='gp-h'>🏁 Punctuality Grand Prix</div>"
+                  f"<div class='gp-sub'>Every on-time check-in pushes your racer towards the "
+                  f"flag — ties go to the fewest minutes in the pits. New week, new race!</div>"
+                  f"<div class='gp-pod'>{podium}</div>{track}{grid}</div>")
+
+
 def render_overall():
     sched = st.session_state.schedule
     st.subheader("🧋 WeDrink Sabah")
@@ -1438,6 +1527,7 @@ def render_overall():
             st.caption("✓ green = on time · ⏰ amber = late (+minutes) · ✗ red = no check-in "
                        "(past days) · dashed = shift not started yet · ⏳ = part-timer. "
                        "Times are actual GPS check-ins recorded at the shop.")
+            st.markdown(race_html(sweek, DATES), unsafe_allow_html=True)
     else:
         who = st.selectbox("🔎 Choose your name to see your week",
                            ["— select —"] + list(employees["name"]))
