@@ -73,7 +73,7 @@ st.set_page_config(page_title="WeDrink Sabah — Shift Dashboard",
                    page_icon="🧋", layout="wide")
 
 # Build marker — bump when debugging deploys to confirm which code Cloud runs.
-APP_BUILD = "b18-2026-07-15"
+APP_BUILD = "b19-2026-07-15"
 
 DEFAULT_ADMIN_USER = "admin"
 DEFAULT_ADMIN_PW = "wedrink2026"
@@ -1523,11 +1523,13 @@ def render_overall():
         if sweek.empty:
             st.info("No shifts scheduled for this week, so there is no attendance to show.")
         else:
+            # Race first — the fun, motivating headline; detailed matrix below.
+            st.markdown(race_html(sweek, DATES), unsafe_allow_html=True)
+            st.markdown("##### 📋 Day-by-day detail")
             st.markdown(attendance_html(sweek, DATES), unsafe_allow_html=True)
             st.caption("✓ green = on time · ⏰ amber = late (+minutes) · ✗ red = no check-in "
                        "(past days) · dashed = shift not started yet · ⏳ = part-timer. "
                        "Times are actual GPS check-ins recorded at the shop.")
-            st.markdown(race_html(sweek, DATES), unsafe_allow_html=True)
     else:
         who = st.selectbox("🔎 Choose your name to see your week",
                            ["— select —"] + list(employees["name"]))
