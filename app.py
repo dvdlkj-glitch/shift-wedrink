@@ -73,7 +73,7 @@ st.set_page_config(page_title="WeDrink Sabah — Shift Dashboard",
                    page_icon="🧋", layout="wide")
 
 # Build marker — bump when debugging deploys to confirm which code Cloud runs.
-APP_BUILD = "b19-2026-07-15"
+APP_BUILD = "b20-2026-07-15"
 
 DEFAULT_ADMIN_USER = "admin"
 DEFAULT_ADMIN_PW = "wedrink2026"
@@ -512,6 +512,83 @@ def db_replace_shifts(df):
                     extra_headers={"Prefer": "return=minimal"})
 
 
+@st.cache_data(ttl=10, show_spinner=False)
+def db_fetch_offdays():
+    """All off-day rows from Supabase as {iso_date: [names]}; None on error."""
+    code, text = _sb_request("off_days?select=work_date,employee&order=work_date", "GET")
+    if code != 200:
+        return None
+    out = {}
+    try:
+        for r in json.loads(text):
+            out.setdefault(str(r["work_date"]), []).append(r["employee"])
+    except Exception:
+        return None
+    return out
+
+
+def offdays_map(base_cfg):
+    """The live off-day map. Supabase is the source of truth when configured
+    (self-seeding once from week_config.json); else the config file."""
+    if not db_enabled():
+        return base_cfg.get("off_days", {})
+    d = db_fetch_offdays()
+    if d is None:                      # transport error — fall back this run
+        return base_cfg.get("off_days", {})
+    if not d and base_cfg.get("off_days"):
+        recs = [{"work_date": k, "employee": n}
+                for k, v in base_cfg["off_days"].items() for n in v]
+        _sb_request("off_days?on_conflict=work_date,employee", "POST", body=recs,
+                    extra_headers={"Prefer": "resolution=ignore-duplicates,return=minimal"})
+        db_fetch_offdays.clear()
+        return base_cfg.get("off_days", {})
+    return d
+
+
+def offday_add(diso, emp):
+    """Grant emp an off day on diso. Returns (ok, err)."""
+    if db_enabled():
+        code, text = _sb_request("off_days?on_conflict=work_date,employee", "POST",
+                                 body=[{"work_date": diso, "employee": emp}],
+                                 extra_headers={"Prefer": "resolution=ignore-duplicates,return=minimal"})
+        if code in (200, 201, 204):
+            db_fetch_offdays.clear()
+            return True, None
+        return False, f"{code}: {text}"
+    try:                               # local fallback: edit week_config.json
+        cfg = json.load(open(CFG_JSON))
+        day = cfg.setdefault("off_days", {}).setdefault(diso, [])
+        if emp not in day:
+            day.append(emp)
+        json.dump(cfg, open(CFG_JSON, "w"), indent=2)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+def offday_remove(diso, emp):
+    """Remove emp's off day on diso. Returns (ok, err)."""
+    if db_enabled():
+        code, text = _sb_request(
+            f"off_days?work_date=eq.{diso}&employee=eq.{quote(emp)}", "DELETE",
+            extra_headers={"Prefer": "return=minimal"})
+        if code in (200, 204):
+            db_fetch_offdays.clear()
+            return True, None
+        return False, f"{code}: {text}"
+    try:
+        cfg = json.load(open(CFG_JSON))
+        day = cfg.get("off_days", {}).get(diso, [])
+        if emp in day:
+            day.remove(emp)
+            if not day:
+                cfg["off_days"].pop(diso, None)
+        json.dump(cfg, open(CFG_JSON, "w"), indent=2)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
 def db_upsert_checkin(rec):
     """Insert/update one check-in (idempotent on work_date+employee+shift).
     Returns (ok, error)."""
@@ -840,6 +917,7 @@ def week_config_for(base, monday):
 try:
     employees = load_employees()
     base_config = load_config()
+    base_config["off_days"] = offdays_map(base_config)   # Supabase-backed leave
     if "week_start_iso" not in st.session_state:
         st.session_state.week_start_iso = base_config["week_start"]
     _ws = datetime.strptime(st.session_state.week_start_iso, "%Y-%m-%d").date()
@@ -1893,6 +1971,51 @@ def render_admin():
             st.session_state.week_start_iso = (_ws - timedelta(days=7)).isoformat()
             st.rerun()
         render_week_nav("admin")
+
+        # ---- On-leave (off days) editor for the viewed week ----
+        wk_off = {d: config.get("off_days", {}).get(d, []) for d in WEEK_ISO}
+        n_off_wk = sum(len(v) for v in wk_off.values())
+        with st.expander(f"🛌 On leave this week — {n_off_wk} entr"
+                         f"{'y' if n_off_wk == 1 else 'ies'} (add / remove)",
+                         expanded=False):
+            st.caption("Saved instantly for everyone — the staff Schedule leave board, "
+                       "Setup tables and Auto-generate all use this list.")
+            for diso in WEEK_ISO:
+                names = wk_off.get(diso, [])
+                d = datetime.strptime(diso, "%Y-%m-%d")
+                cols = st.columns([1.1] + [1] * max(1, len(names)) + [2])
+                cols[0].markdown(f"**{d.strftime('%a %d %b')}**")
+                if not names:
+                    cols[1].caption("— nobody off —")
+                for i, nm in enumerate(names):
+                    if cols[1 + i].button(f"🛌 {nm} ✕", key=f"offrm_{diso}_{nm}",
+                                          help=f"Remove {nm}'s off day on {diso}"):
+                        ok, err = offday_remove(diso, nm)
+                        if ok:
+                            st.toast(f"Removed {nm}'s off day ({diso}).")
+                            st.rerun()
+                        else:
+                            st.error(f"Could not remove: {err}")
+            a1, a2, a3 = st.columns([1.4, 1.4, 1])
+            add_day = a1.selectbox(
+                "Day", WEEK_ISO,
+                format_func=lambda x: datetime.strptime(x, "%Y-%m-%d").strftime("%a %d %b"),
+                key="off_add_day")
+            add_emp = a2.selectbox("Staff", list(employees["name"]), key="off_add_emp")
+            a3.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+            if a3.button("➕ Add off day", type="primary", key="off_add_btn"):
+                if add_emp in config.get("off_days", {}).get(add_day, []):
+                    st.info(f"{add_emp} is already off on {add_day}.")
+                else:
+                    ok, err = offday_add(add_day, add_emp)
+                    if ok:
+                        st.toast(f"{add_emp} is now off on {add_day}. 🛌")
+                        st.rerun()
+                    else:
+                        st.error(f"Could not add: {err}")
+            st.caption("⚠️ Adding an off day does not remove already-assigned shifts on "
+                       "that day — check the grid below and remove any clashing shift.")
+
         c1, c2, c3, c4 = st.columns([1.6, 1.3, 1, 1.4])
         with c1:
             if st.button("⚡ Auto-generate THIS week", type="primary", width="stretch"):
