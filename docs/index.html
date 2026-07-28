@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#0C1A20">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="WeDrink">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<title>WeDrink Check-In</title>
+<style>
+  :root{--bg:#0C1A20;--panel:#132630;--panel2:#16303A;--line:rgba(80,190,180,.18);
+        --tx:#E9F3F1;--mut:#8AA6A0;--teal:#37D7D0;--green:#2ec878;--amber:#F2A03D;
+        --red:#E25B4D;--blue:#5db4ff;}
+  *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+  html{-webkit-text-size-adjust:100%}
+  body{font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;background:
+    radial-gradient(700px 380px at 10% -10%, rgba(55,215,208,.14) 0%, transparent 55%),
+    radial-gradient(640px 340px at 110% -8%, rgba(242,160,61,.12) 0%, transparent 55%),
+    linear-gradient(160deg,#0C1A20 0%,#0A1519 60%,#0B1A1E 100%);
+    color:var(--tx);min-height:100vh;min-height:100dvh}
+  .wrap{max-width:520px;margin:0 auto;padding:18px 16px calc(24px + env(safe-area-inset-bottom))}
+  header{display:flex;align-items:center;gap:12px;margin:6px 0 16px}
+  header img{width:46px;height:46px;border-radius:13px}
+  header h1{font-size:20px;line-height:1.1}
+  header .sub{color:var(--mut);font-size:12px;margin-top:2px}
+  .card{background:linear-gradient(165deg,rgba(22,44,52,.94),rgba(15,32,38,.94));
+    border:1px solid var(--line);border-radius:18px;padding:16px;margin-bottom:14px;
+    box-shadow:0 10px 28px rgba(0,0,0,.3)}
+  label{display:block;font-size:12px;color:var(--mut);margin-bottom:6px;font-weight:600}
+  select{width:100%;padding:14px;background:#0c1720;border:1px solid var(--line);
+    border-radius:12px;color:var(--tx);font-size:16px;font-weight:600;appearance:none}
+  .shift{border:1px solid var(--line);border-left:4px solid var(--teal);border-radius:12px;
+    padding:11px 13px;margin:8px 0;background:rgba(9,20,24,.55);font-size:14px}
+  .shift b{font-size:15px}
+  .shift .st{font-size:12.5px;margin-top:3px}
+  .ok{color:#67E0A3}.late{color:#F2C070}.mut{color:var(--mut)}.blue{color:var(--blue)}
+  .bigbtn{width:100%;min-height:60px;border:none;border-radius:15px;font-size:17px;
+    font-weight:700;cursor:pointer;margin-top:6px;touch-action:manipulation}
+  .btn-in{background:linear-gradient(135deg,#37D7D0,#1C9C96);color:#06231f;
+    box-shadow:0 8px 22px rgba(55,215,208,.32)}
+  .btn-brk{background:rgba(255,255,255,.08);color:var(--tx);border:1px solid var(--line)}
+  .btn-res{background:linear-gradient(135deg,#6fc3ff,#3d8fd6);color:#0b1c2e;
+    box-shadow:0 8px 22px rgba(110,195,255,.28)}
+  .bigbtn:disabled{opacity:.55}
+  #msg{margin-top:12px;font-size:14.5px;line-height:1.55;min-height:20px}
+  .kpi{display:flex;gap:8px;margin-top:10px}
+  .kpi div{flex:1;background:rgba(255,255,255,.05);border:1px solid var(--line);
+    border-radius:12px;padding:9px;text-align:center}
+  .kpi b{display:block;font-size:17px;color:var(--teal)}
+  .kpi span{font-size:10px;color:var(--mut);text-transform:uppercase;letter-spacing:.5px}
+  .foot{text-align:center;color:#5F776F;font-size:11.5px;margin-top:16px;line-height:1.7}
+  #installTip{display:none;background:rgba(55,215,208,.1);border:1px dashed rgba(55,215,208,.35);
+    border-radius:12px;padding:10px 13px;font-size:12.5px;color:#B9CEC9;margin-bottom:14px}
+  #installBtn{display:none;width:100%;margin-bottom:14px;background:rgba(242,160,61,.16);
+    border:1px solid rgba(242,160,61,.4);color:#F2C070;min-height:48px;border-radius:12px;
+    font-weight:700;font-size:14px}
+  .pulse{animation:pu 2s ease-in-out infinite}
+  @keyframes pu{0%,100%{opacity:1}50%{opacity:.55}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <img src="icon-192.png" alt="">
+    <div>
+      <h1>WeDrink Check-In 🧋</h1>
+      <div class="sub" id="clock">…</div>
+    </div>
+  </header>
+
+  <button id="installBtn">📲 Install this app on your phone</button>
+  <div id="installTip">📲 <b>iPhone:</b> tap Share <span style="font-size:15px">⎋</span> →
+    <b>Add to Home Screen</b> to install this as an app.</div>
+
+  <div class="card">
+    <label>Your name</label>
+    <select id="who"><option value="">— select your name —</option></select>
+    <div id="shifts"></div>
+    <div id="action"></div>
+    <div id="msg"></div>
+  </div>
+
+  <div class="foot">📍 Your location is captured only when you tap a button, and only used to
+    confirm you're at the branch.<br>WeDrink Sabah · Aeropod · Lintas Plaza · Beverly Hills</div>
+</div>
+
+<script>
+/* ===== config (mirror of the dashboard's rules) ===== */
+var SB_URL="https://njrokrqqvmoevvfhjbju.supabase.co";
+var SB_KEY="sb_publishable_n3HBjj9fPb9HbyOdmTiBHw_lYCTw_PI";
+var SITES={ "Aeropod":{lat:5.9500945,lng:116.0602531,radius:30,label:"WEDRINK Aeropod"},
+            "Lintas":{lat:5.9467764,lng:116.0879396,radius:30,label:"WEDRINK Lintas Plaza"},
+            "Beverly":{lat:5.9388445,lng:116.1016763,radius:30,label:"WEDRINK Beverly Hills"} };
+var EARLY_MIN=15, BREAK_MIN=60, GRACE_MIN=5, MAX_ACC=150, TZ_OFF=8*60; /* MYT = UTC+8 */
+
+/* ===== tiny supabase REST ===== */
+function H(extra){ var h={apikey:SB_KEY,Authorization:'Bearer '+SB_KEY,
+  'Content-Type':'application/json'}; if(extra)Object.assign(h,extra); return h; }
+function GET(p){ return fetch(SB_URL+'/rest/v1/'+p,{headers:H()}).then(function(r){return r.json();}); }
+function POST(p,body,extra){ return fetch(SB_URL+'/rest/v1/'+p,
+  {method:'POST',headers:H(extra),body:JSON.stringify(body)}); }
+function PATCH(p,body){ return fetch(SB_URL+'/rest/v1/'+p,
+  {method:'PATCH',headers:H({Prefer:'return=minimal'}),body:JSON.stringify(body)}); }
+
+/* ===== trusted clock: server time + local elapsed ===== */
+var srvBase=null, srvAt=null;
+function syncClock(){
+  return fetch(SB_URL+'/rest/v1/rpc/server_now',{method:'POST',headers:H(),body:'{}'})
+    .then(function(r){return r.json();})
+    .then(function(iso){ srvBase=new Date(iso).getTime(); srvAt=Date.now(); })
+    .catch(function(){ srvBase=Date.now(); srvAt=Date.now(); });
+}
+function nowUTCms(){ return srvBase===null ? Date.now() : srvBase + (Date.now()-srvAt); }
+function mytNow(){ return new Date(nowUTCms() + TZ_OFF*60000); }   /* read as UTC fields */
+function mytToday(){ return mytNow().toISOString().slice(0,10); }
+function mytMin(){ var d=mytNow(); return d.getUTCHours()*60 + d.getUTCMinutes(); }
+function hhmm(m){ m=((Math.round(m)%1440)+1440)%1440;
+  return ('0'+Math.floor(m/60)).slice(-2)+':'+('0'+(m%60)).slice(-2); }
+function toMin(s){ var p=String(s||'').split(':'); return (+p[0])*60+(+p[1]||0); }
+function hav(a,b,c,d){ var R=6371000,q=Math.PI/180;
+  var x=Math.sin((c-a)*q/2), y=Math.sin((d-b)*q/2);
+  var h=x*x+Math.cos(a*q)*Math.cos(c*q)*y*y; return 2*R*Math.asin(Math.sqrt(h)); }
+
+/* ===== state ===== */
+var whoSel=document.getElementById('who'), shiftsEl=document.getElementById('shifts'),
+    actionEl=document.getElementById('action'), msgEl=document.getElementById('msg');
+var state={shifts:[],checkins:[],breaks:[]};
+function say(html,cls){ msgEl.className=cls||''; msgEl.innerHTML=html; }
+
+function loadNames(){
+  GET('shifts?select=employee&order=employee').then(function(rows){
+    var seen={}, names=[];
+    (rows||[]).forEach(function(r){ if(!seen[r.employee]){seen[r.employee]=1;names.push(r.employee);} });
+    names.sort().forEach(function(n){
+      var o=document.createElement('option'); o.value=n; o.textContent=n; whoSel.appendChild(o);
+    });
+    var saved=localStorage.getItem('wd_name');
+    if(saved && names.indexOf(saved)>=0){ whoSel.value=saved; refresh(); }
+  });
+}
+
+function refresh(){
+  var who=whoSel.value;
+  shiftsEl.innerHTML=''; actionEl.innerHTML=''; say('');
+  if(!who) return;
+  localStorage.setItem('wd_name', who);
+  var today=mytToday();
+  Promise.all([
+    GET('shifts?select=*&work_date=eq.'+today+'&employee=eq.'+encodeURIComponent(who)+'&order=start_time'),
+    GET('check_ins?select=*&work_date=eq.'+today+'&employee=eq.'+encodeURIComponent(who)),
+    GET('breaks?select=*&work_date=eq.'+today+'&employee=eq.'+encodeURIComponent(who))
+  ]).then(function(res){
+    state.shifts=res[0]||[]; state.checkins=res[1]||[]; state.breaks=res[2]||[];
+    render(who);
+  }).catch(function(){ say('Network problem — pull down to refresh.','late'); });
+}
+
+function ciFor(sh){ return state.checkins.find(function(c){return c.shift===sh.shift;}); }
+function brFor(sh){ return state.breaks.find(function(b){return b.shift===sh.shift;}); }
+
+function render(who){
+  var today=mytToday(), nmin=mytMin();
+  if(!state.shifts.length){
+    shiftsEl.innerHTML='<div class="shift" style="border-left-color:#5F776F">'+
+      '<b>No shift today</b><div class="st mut">Enjoy your rest day 🌴 — if that\'s wrong, ask your admin.</div></div>';
+    return;
+  }
+  var html='';
+  state.shifts.forEach(function(sh){
+    var ci=ciFor(sh), st;
+    if(ci){
+      var late=ci.minutes_late||0;
+      st = late>0 ? '<span class="late">✓ checked in '+String(ci.clock_in).slice(11,16)+' · ⏰ '+late+' min late</span>'
+                  : '<span class="ok">✓ checked in '+String(ci.clock_in).slice(11,16)+' · on time</span>';
+    } else {
+      st='<span class="mut">not checked in · opens '+hhmm(toMin(sh.start_time)-EARLY_MIN)+'</span>';
+    }
+    html+='<div class="shift"><b>'+(SITES[sh.location]?SITES[sh.location].label:sh.location)+
+          '</b> · '+sh.shift+' · '+sh.start_time+'–'+sh.end_time+'<div class="st">'+st+'</div></div>';
+  });
+  shiftsEl.innerHTML=html;
+
+  /* pick target: first un-checked-in shift whose window opened */
+  var target=null, soonest=null;
+  for(var i=0;i<state.shifts.length;i++){
+    var sh=state.shifts[i];
+    if(ciFor(sh)) continue;
+    var openM=toMin(sh.start_time)-EARLY_MIN;
+    if(nmin>=openM){ target=sh; break; }
+    if(!soonest||openM<toMin(soonest.start_time)-EARLY_MIN) soonest=sh;
+  }
+  if(target){
+    var lateBy=Math.max(0, nmin-toMin(target.start_time));
+    actionEl.innerHTML='<button class="bigbtn btn-in" id="ci">📍 Check in now'+
+      (lateBy>0?' <small>('+lateBy+' min late)</small>':'')+'</button>';
+    document.getElementById('ci').onclick=function(){ doCheckin(who,target); };
+    return;
+  }
+  if(soonest){
+    say('⏳ Check-in for your '+soonest.shift+' shift ('+soonest.start_time+') opens at <b>'+
+        hhmm(toMin(soonest.start_time)-EARLY_MIN)+'</b>.','mut');
+    return;
+  }
+  /* all checked in -> break machine on the latest shift */
+  var cur=state.shifts[state.shifts.length-1];
+  var br=brFor(cur);
+  if(!br){
+    actionEl.innerHTML='<button class="bigbtn btn-brk" id="bs">☕ Start my break ('+BREAK_MIN+' min)</button>';
+    document.getElementById('bs').onclick=function(){ startBreak(who,cur); };
+  } else if(!br.resume_at){
+    var el=Math.max(0,Math.round((nowUTCms()-new Date(br.break_start).getTime())/60000));
+    var left=BREAK_MIN-el;
+    var dueM=(toMinFromTs(br.break_start)+BREAK_MIN)%1440;
+    say(left>=0 ? '☕ On break for <b>'+el+' min</b> — resume by <b>'+hhmm(dueM)+'</b> ('+left+' min left).'
+                : '☕ On break <b>'+el+' min</b> — <b class="late">'+(-left)+' min over!</b> Head back and tap Resume.',
+        left>=0?'blue':'late');
+    actionEl.innerHTML='<button class="bigbtn btn-res" id="br">🔙 Resume — I\'m back at the shop</button>';
+    document.getElementById('br').onclick=function(){ doResume(who,cur,br); };
+  } else {
+    var dur=Math.round((new Date(br.resume_at)-new Date(br.break_start))/60000);
+    var over=br.minutes_over||0;
+    say('🧋 All checked in · ☕ break done ('+dur+' min'+
+        (over>GRACE_MIN?' · <span class="late">⏰ '+over+' min over</span>':' · ✅ within time')+
+        '). Have a great shift!','ok');
+  }
+}
+function toMinFromTs(ts){ var d=new Date(new Date(ts).getTime()+TZ_OFF*60000);
+  return d.getUTCHours()*60+d.getUTCMinutes(); }
+
+/* ===== actions ===== */
+function getGPS(cb){
+  if(!navigator.geolocation){ say('This device does not support GPS.','late'); return; }
+  say('<span class="pulse">Getting your location…</span>','mut');
+  navigator.geolocation.getCurrentPosition(function(pos){
+    cb(pos.coords.latitude, pos.coords.longitude, Math.round(pos.coords.accuracy));
+  }, function(err){
+    var t={1:'Location permission denied — allow location for this app and retry.',
+           2:'Position unavailable — move outdoors / near a window.',
+           3:'Timed out — please try again.'};
+    say(t[err.code]||('Location error: '+err.message),'late');
+  }, {enableHighAccuracy:true, timeout:12000, maximumAge:0});
+}
+
+function doCheckin(who, sh){
+  var site=SITES[sh.location];
+  if(!site){ say('Branch geofence not configured.','late'); return; }
+  getGPS(function(lat,lng,acc){
+    if(acc>MAX_ACC){ say('GPS signal too weak (±'+acc+' m). Move near a window and retry.','late'); return; }
+    var dist=Math.round(hav(lat,lng,site.lat,site.lng));
+    if(dist>site.radius){ say('You are about <b>'+dist+' m</b> from '+site.label+
+      ' (must be within '+site.radius+' m). Move closer and retry.','late'); return; }
+    var nmin=mytMin(), openM=toMin(sh.start_time)-EARLY_MIN;
+    if(nmin<openM){ say('Too early — opens at '+hhmm(openM)+'.','late'); return; }
+    var late=Math.max(0, Math.round(nmin-toMin(sh.start_time)));
+    var stamp=mytToday()+' '+hhmm(nmin);
+    say('<span class="pulse">Saving your check-in…</span>','mut');
+    POST('check_ins?on_conflict=work_date,employee,shift',
+      [{work_date:mytToday(), employee:who, branch:sh.location, shift:sh.shift,
+        shift_start:sh.start_time, clock_in:stamp, lat:+lat.toFixed(6), lng:+lng.toFixed(6),
+        accuracy_m:acc, distance_m:dist, minutes_late:late}],
+      {Prefer:'resolution=ignore-duplicates,return=minimal'})
+    .then(function(r){
+      if(r.status===201||r.status===200||r.status===204){
+        say('✓ <b>'+who+'</b> checked in at <b>'+stamp+'</b> · '+site.label+' · '+
+            (late>0?'⏰ '+late+' min late':'✅ on time')+' · '+dist+' m from the shop.','ok');
+        setTimeout(refresh,1200);
+      } else { say('Could not save — please tap again. ('+r.status+')','late'); }
+    }).catch(function(){ say('Network problem — check connection and tap again.','late'); });
+  });
+}
+
+function startBreak(who, sh){
+  POST('breaks?on_conflict=work_date,employee,shift',
+    [{work_date:mytToday(), employee:who, shift:sh.shift}],
+    {Prefer:'resolution=ignore-duplicates,return=minimal'})
+  .then(function(r){
+    if(r.status===201||r.status===200||r.status===204){
+      say('☕ Break started — see you in '+BREAK_MIN+' minutes!','blue');
+      setTimeout(refresh,800);
+    } else { say('Could not start break. ('+r.status+')','late'); }
+  }).catch(function(){ say('Network problem — tap again.','late'); });
+}
+
+function doResume(who, sh, br){
+  var site=SITES[sh.location];
+  getGPS(function(lat,lng,acc){
+    if(acc>MAX_ACC){ say('GPS signal too weak (±'+acc+' m). Retry near a window.','late'); return; }
+    var dist=Math.round(hav(lat,lng,site.lat,site.lng));
+    if(dist>site.radius){ say('You are about <b>'+dist+' m</b> from '+site.label+
+      ' (must be within '+site.radius+' m to resume). Move closer and retry.','late'); return; }
+    var el=(nowUTCms()-new Date(br.break_start).getTime())/60000;
+    var over=Math.max(0, Math.round(el-BREAK_MIN));
+    say('<span class="pulse">Saving…</span>','mut');
+    PATCH('breaks?work_date=eq.'+mytToday()+'&employee=eq.'+encodeURIComponent(who)+
+          '&shift=eq.'+encodeURIComponent(sh.shift),
+      {resume_at:new Date(nowUTCms()).toISOString(), resume_lat:+lat.toFixed(6),
+       resume_lng:+lng.toFixed(6), resume_acc:acc, resume_dist:dist, minutes_over:over})
+    .then(function(r){
+      if(r.status===200||r.status===204){
+        say('✓ Welcome back! Break was <b>'+Math.round(el)+' min</b> · '+
+            (over<=GRACE_MIN?'✅ within break time':'⏰ <b>'+over+' min</b> over')+
+            ' · '+dist+' m from the shop.','ok');
+        setTimeout(refresh,1200);
+      } else { say('Could not save — tap again. ('+r.status+')','late'); }
+    }).catch(function(){ say('Network problem — tap again.','late'); });
+  });
+}
+
+/* ===== clock line + boot ===== */
+function tickClock(){
+  var d=mytNow();
+  document.getElementById('clock').textContent =
+    ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][d.getUTCDay()]+' '+
+    d.getUTCDate()+' '+['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getUTCMonth()]+
+    ' · '+hhmm(d.getUTCHours()*60+d.getUTCMinutes())+' (Sabah time)';
+}
+whoSel.onchange=refresh;
+syncClock().then(function(){ tickClock(); loadNames(); });
+setInterval(tickClock,15000);
+setInterval(function(){ if(whoSel.value) refresh(); },30000);
+
+/* ===== install UX ===== */
+var deferredPrompt=null;
+window.addEventListener('beforeinstallprompt',function(e){
+  e.preventDefault(); deferredPrompt=e;
+  document.getElementById('installBtn').style.display='block';
+});
+document.getElementById('installBtn').onclick=function(){
+  if(deferredPrompt){ deferredPrompt.prompt(); deferredPrompt=null;
+    this.style.display='none'; }
+};
+(function(){
+  var isIOS=/iphone|ipad|ipod/i.test(navigator.userAgent);
+  var standalone=window.matchMedia('(display-mode: standalone)').matches||navigator.standalone;
+  if(isIOS && !standalone) document.getElementById('installTip').style.display='block';
+})();
+if('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
+</script>
+</body>
+</html>
