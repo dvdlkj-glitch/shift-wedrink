@@ -73,7 +73,7 @@ st.set_page_config(page_title="WeDrink Sabah — Shift Dashboard",
                    page_icon="🧋", layout="wide")
 
 # Build marker — bump when debugging deploys to confirm which code Cloud runs.
-APP_BUILD = "b20-2026-07-15"
+APP_BUILD = "b21-2026-07-23"
 
 DEFAULT_ADMIN_USER = "admin"
 DEFAULT_ADMIN_PW = "wedrink2026"
@@ -216,7 +216,7 @@ def haversine_m(lat1, lng1, lat2, lng2):
 
 
 def load_settings():
-    d = {"early_min": DEFAULT_EARLY_MIN}
+    d = {"early_min": DEFAULT_EARLY_MIN, "break_min": 60, "break_grace": 5}
     if os.path.exists(SETTINGS_JSON):
         try:
             d.update(json.load(open(SETTINGS_JSON)) or {})
@@ -589,6 +589,111 @@ def offday_remove(diso, emp):
         return False, str(e)
 
 
+@st.cache_data(ttl=5, show_spinner=False)
+def db_fetch_breaks(dates_tuple):
+    """Break rows for the given ISO dates. Returns list of dicts."""
+    if not db_enabled() or not dates_tuple:
+        return []
+    q = urlencode({"select": "*", "work_date": f"in.({','.join(dates_tuple)})"})
+    code, text = _sb_request(f"breaks?{q}", "GET")
+    if code == 200:
+        try:
+            return json.loads(text)
+        except Exception:
+            return []
+    return []
+
+
+def break_begin(diso, emp, shift):
+    """Start a break (server-side; leaving the shop needs no geofence)."""
+    if not db_enabled():
+        return False, "Supabase not configured"
+    code, text = _sb_request("breaks?on_conflict=work_date,employee,shift", "POST",
+                             body=[{"work_date": diso, "employee": emp, "shift": shift}],
+                             extra_headers={"Prefer": "resolution=ignore-duplicates,return=minimal"})
+    if code in (200, 201, 204):
+        db_fetch_breaks.clear()
+        return True, None
+    return False, f"{code}: {text}"
+
+
+def break_resume_html(brk, r, site):
+    """Resume-from-break button: GPS + geofence enforced inside the component
+    iframe (same pattern as check-in), PATCHes the break row in Supabase."""
+    url, key = _sb()
+    stt = load_settings()
+    ctx = json.dumps({
+        "sb": {"url": url or "", "key": key or ""},
+        "emp": str(r["employee"]), "date": str(r["date"]), "shift": str(r["shift"]),
+        "branchLabel": loc_label(r["location"]),
+        "site": {"lat": float(site["lat"]), "lng": float(site["lng"]),
+                 "radius": float(site.get("radius_m", 20))},
+        "maxAcc": MAX_ACCURACY_M,
+        "breakMin": int(stt.get("break_min", 60)),
+        "graceMin": int(stt.get("break_grace", 5)),
+        "startEpochMs": int(pd.Timestamp(brk["break_start"]).timestamp() * 1000),
+    })
+    tmpl = """
+<div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif">
+  <button id="rbtn" style="width:100%;min-height:58px;border:none;border-radius:14px;
+    font-size:17px;font-weight:700;color:#0b1c2e;cursor:pointer;
+    background:linear-gradient(135deg,#6fc3ff,#3d8fd6);box-shadow:0 8px 22px rgba(110,195,255,.3)">
+    🔙 Resume — I'm back at the shop
+  </button>
+  <div id="rmsg" style="margin-top:10px;font-size:14px;color:#8AA6A0;min-height:20px;line-height:1.5"></div>
+</div>
+<script>
+(function(){
+  var C=__CTX__;
+  var b=document.getElementById('rbtn'), m=document.getElementById('rmsg');
+  function hav(a,b2,c,d){ var R=6371000,p=Math.PI/180;
+    var x=Math.sin((c-a)*p/2), y=Math.sin((d-b2)*p/2);
+    var h=x*x+Math.cos(a*p)*Math.cos(c*p)*y*y; return 2*R*Math.asin(Math.sqrt(h)); }
+  function ok(html){ m.style.color='#67E0A3'; m.innerHTML=html; }
+  function bad(html){ m.style.color='#F2A0A0'; m.innerHTML=html; b.disabled=false; b.style.opacity=1; }
+  function hdrs(){ return {apikey:C.sb.key, Authorization:'Bearer '+C.sb.key,
+                          'Content-Type':'application/json'}; }
+  b.onclick=function(){
+    if(!navigator.geolocation){ bad('This device does not support GPS.'); return; }
+    b.disabled=true; b.style.opacity=.6; m.style.color='#8AA6A0';
+    m.textContent='Getting your location…';
+    navigator.geolocation.getCurrentPosition(function(pos){
+      var lat=pos.coords.latitude, lng=pos.coords.longitude, acc=Math.round(pos.coords.accuracy);
+      if(acc>C.maxAcc){ bad('GPS signal too weak (±'+acc+' m). Move near a window and retry.'); return; }
+      var dist=Math.round(hav(lat,lng,C.site.lat,C.site.lng));
+      if(dist>C.site.radius){ bad('You are about '+dist+' m from '+C.branchLabel+
+        ' (must be within '+Math.round(C.site.radius)+' m to resume). Move closer and retry.'); return; }
+      var elapsedMin=(Date.now()-C.startEpochMs)/60000;
+      var over=Math.max(0, Math.round(elapsedMin - C.breakMin));
+      m.textContent='Saving…';
+      var qs='work_date=eq.'+C.date+'&employee=eq.'+encodeURIComponent(C.emp)+
+             '&shift=eq.'+encodeURIComponent(C.shift);
+      fetch(C.sb.url+'/rest/v1/breaks?'+qs,{
+        method:'PATCH',
+        headers:Object.assign(hdrs(),{Prefer:'return=minimal'}),
+        body:JSON.stringify({resume_at:new Date().toISOString(),
+          resume_lat:+lat.toFixed(6), resume_lng:+lng.toFixed(6),
+          resume_acc:acc, resume_dist:dist, minutes_over:over})
+      }).then(function(resp){
+        if(resp.status===200||resp.status===204){
+          var dur=Math.round(elapsedMin);
+          ok('✓ Welcome back! Break was <b>'+dur+' min</b> · '+
+             (over<=C.graceMin?'✅ within break time':'⏰ <b>'+over+' min</b> over')+
+             ' · '+dist+' m from the shop.<br><span style="color:#8AA6A0">Recorded.</span>');
+        } else { bad('Could not save — tap to try again. ('+resp.status+')'); }
+      }).catch(function(){ bad('Network problem — check your connection and tap again.'); });
+    }, function(err){
+      var t={1:'Location permission denied — allow location and retry.',
+             2:'Position unavailable — move near a window.', 3:'Timed out — try again.'};
+      bad(t[err.code]||('Location error: '+err.message));
+    }, {enableHighAccuracy:true, timeout:12000, maximumAge:0});
+  };
+})();
+</script>
+"""
+    return tmpl.replace("__CTX__", ctx)
+
+
 def db_upsert_checkin(rec):
     """Insert/update one check-in (idempotent on work_date+employee+shift).
     Returns (ok, error)."""
@@ -681,7 +786,7 @@ def todays_checkins():
     return out
 
 
-def checkin_map_html(checkins, sites, height=380):
+def checkin_map_html(checkins, sites, breaks=None, height=380):
     """Leaflet map: branch geofences + a pin per checked-in staff.
     When Supabase is configured, the map's own JS re-fetches today's check-ins
     every 20s (browser-side, publishable key + RLS) — no Streamlit reruns, so
@@ -692,6 +797,7 @@ def checkin_map_html(checkins, sites, height=380):
     radii = sorted({b["radius"] for b in branches})
     radius_lbl = (f"{radii[0]}&nbsp;m" if len(radii) == 1
                   else f"{radii[0]}–{radii[-1]}&nbsp;m") if radii else "—"
+    on_break = {b["employee"] for b in (breaks or []) if not b.get("resume_at")}
     pins = []
     for c in checkins:
         br = c.get("branch")
@@ -703,7 +809,8 @@ def checkin_map_html(checkins, sites, height=380):
             lat, lng = s["lat"], s["lng"]
         pins.append({"name": c.get("employee", ""), "lat": float(lat), "lng": float(lng),
                      "branch": loc_label(br), "time": str(c.get("clock_in", ""))[11:16],
-                     "late": int(c.get("minutes_late") or 0), "shift": c.get("shift", "")})
+                     "late": int(c.get("minutes_late") or 0), "shift": c.get("shift", ""),
+                     "brk": c.get("employee", "") in on_break})
     sb_url, sb_key = _sb()
     data = json.dumps({
         "branches": branches, "pins": pins,
@@ -725,6 +832,7 @@ def checkin_map_html(checkins, sites, height=380):
 <div id="lg">
   <div><i style="background:#2ec878"></i>On time</div>
   <div><i style="background:#F2A03D"></i>Late</div>
+  <div><i style="background:#5db4ff"></i>On break ☕</div>
   <div><i style="background:transparent;border:2px solid #37D7D0"></i>Branch · __RADIUS__</div>
 </div>
 <script>
@@ -756,10 +864,10 @@ function placeSpread(){
 }
 map.on('zoomend', placeSpread);
 function mkPin(p, la, ln){
-  var col=p.late>0?'#F2A03D':'#2ec878';
+  var col=p.brk?'#5db4ff':(p.late>0?'#F2A03D':'#2ec878');
   var m=L.circleMarker([la,ln],{radius:8,color:'#08131a',weight:2,fillColor:col,fillOpacity:.95}).addTo(pinLayer);
   m.bindTooltip(p.name,{permanent:true,direction:'top',offset:[0,-7],className:'lbl'});
-  m.bindPopup('<b>'+p.name+'</b><br>'+p.branch+' · '+p.shift+'<br>🕒 '+p.time+(p.late>0?(' · ⏰ '+p.late+'m late'):' · ✅ on time'));
+  m.bindPopup('<b>'+p.name+'</b><br>'+p.branch+' · '+p.shift+'<br>🕒 '+p.time+(p.late>0?(' · ⏰ '+p.late+'m late'):' · ✅ on time')+(p.brk?'<br>☕ on break now':''));
   return m;
 }
 function draw(pins){
@@ -795,12 +903,17 @@ function rowToPin(r){
 }
 function refresh(){
   if(!D.sb.url||!D.sb.key) return;
-  fetch(D.sb.url+'/rest/v1/check_ins?select=*&work_date=eq.'+D.sb.today,
-        {headers:{apikey:D.sb.key, Authorization:'Bearer '+D.sb.key}})
-    .then(function(r){return r.json();})
-    .then(function(rows){
+  var H={headers:{apikey:D.sb.key, Authorization:'Bearer '+D.sb.key}};
+  Promise.all([
+    fetch(D.sb.url+'/rest/v1/check_ins?select=*&work_date=eq.'+D.sb.today,H).then(function(r){return r.json();}),
+    fetch(D.sb.url+'/rest/v1/breaks?select=employee,resume_at&work_date=eq.'+D.sb.today,H).then(function(r){return r.json();}).catch(function(){return [];})
+  ])
+    .then(function(res2){
+      var rows=res2[0], brs=Array.isArray(res2[1])?res2[1]:[];
       if(!Array.isArray(rows)) return;
-      draw(rows.map(rowToPin).filter(Boolean));
+      var onb={};
+      brs.forEach(function(x){ if(!x.resume_at) onb[x.employee]=1; });
+      draw(rows.map(rowToPin).filter(Boolean).map(function(p){ p.brk=!!onb[p.name]; return p; }));
       var t=new Date();
       document.getElementById('lv').textContent=' · '+('0'+t.getHours()).slice(-2)+':'+('0'+t.getMinutes()).slice(-2)+':'+('0'+t.getSeconds()).slice(-2);
     }).catch(function(){});
@@ -1315,6 +1428,55 @@ def render_checkin_ui():
     target, status, open_m = pick_checkin_target(todays, now_min, win)
     if status == "done":
         st.success("You're all checked in for today — have a great shift! 🧋")
+        # ---- Break time flow: start break -> resume (geofenced) ----
+        done_shifts = todays[todays["clock_in"].astype(str).str.strip() != ""]
+        if not done_shifts.empty and db_enabled():
+            cur = done_shifts.sort_values("start").iloc[-1]   # current shift
+            stt = load_settings()
+            bmin = int(stt.get("break_min", 60))
+            grace = int(stt.get("break_grace", 5))
+            brks = db_fetch_breaks((today.isoformat(),))
+            mybrk = next((b for b in brks
+                          if b["employee"] == who and b["shift"] == cur["shift"]), None)
+            st.markdown("---")
+            if mybrk is None:
+                st.markdown(f"**☕ Break time** — you have **{bmin} min**; tap when you "
+                            "leave, and Resume (at the shop) when you're back.")
+                if st.button("☕ Start my break", type="secondary", width="stretch",
+                             key="brk_start"):
+                    ok2, err2 = break_begin(today.isoformat(), who, cur["shift"])
+                    if ok2:
+                        st.toast(f"Break started — see you in {bmin} minutes! ☕")
+                        st.rerun()
+                    else:
+                        st.error(f"Could not start break: {err2}")
+            elif not mybrk.get("resume_at"):
+                start_ts = pd.Timestamp(mybrk["break_start"])
+                elapsed = max(0, int((pd.Timestamp.now(tz="UTC") -
+                                      start_ts).total_seconds() // 60))
+                due = (start_ts + pd.Timedelta(minutes=bmin)).tz_convert("Asia/Kuching")
+                left = bmin - elapsed
+                if left >= 0:
+                    st.info(f"☕ On break for **{elapsed} min** — resume by "
+                            f"**{due.strftime('%H:%M')}** ({left} min left).")
+                else:
+                    st.warning(f"☕ On break for **{elapsed} min** — **{-left} min over**! "
+                               "Head back and tap Resume at the shop.")
+                site2 = load_sites().get(cur["location"], {})
+                if site2.get("configured"):
+                    components.html(break_resume_html(mybrk, cur, site2), height=160)
+                else:
+                    st.error("Branch geofence not set — ask your admin.")
+            else:
+                dur = int((pd.Timestamp(mybrk["resume_at"]) -
+                           pd.Timestamp(mybrk["break_start"])).total_seconds() // 60)
+                over = int(mybrk.get("minutes_over") or 0)
+                if over <= grace:
+                    st.success(f"☕ Break done — {dur} min, ✅ within break time. "
+                               "Back on shift!")
+                else:
+                    st.warning(f"☕ Break done — {dur} min, ⏰ {over} min over. "
+                               "Recorded; back on shift!")
         return
     if status == "too_early":
         st.info(f"⏳ Check-in for your **{target['shift']}** shift ({target['start']}) opens at "
@@ -1349,9 +1511,11 @@ def render_checkin_map():
     polls Supabase every 20s with the publishable key) — no st.fragment, no
     server reruns, so nothing can race Streamlit and crash the app."""
     st.markdown("##### 🗺️ Checked in today &nbsp;·&nbsp; 🔄 live")
-    components.html(checkin_map_html(todays_checkins(), load_sites()), height=410)
+    brks_today = db_fetch_breaks((now_myt().date().isoformat(),)) if db_enabled() else []
+    components.html(checkin_map_html(todays_checkins(), load_sites(), brks_today),
+                    height=410)
     st.caption("Count and pins update automatically every 20 seconds · "
-               "tap a pin for name & time.")
+               "tap a pin for name & time · ☕ blue = currently on break.")
 
 
 def offday_board_html(off_map, dates):
@@ -1393,6 +1557,9 @@ def attendance_html(sweek, dates):
     today = now_myt().date()
     cks = db_fetch_checkins(tuple(d.isoformat() for d in dates)) if db_enabled() else []
     idx = {(c["employee"], str(c["work_date"]), c["shift"]): c for c in cks}
+    brks = db_fetch_breaks(tuple(d.isoformat() for d in dates)) if db_enabled() else []
+    bidx = {(b["employee"], str(b["work_date"]), b["shift"]): b for b in brks}
+    grace = int(load_settings().get("break_grace", 5))
     staff = sorted(sweek["employee"].unique(),
                    key=lambda n: (emp_type(n) != "full", n))
     css = """<style>
@@ -1446,10 +1613,22 @@ def attendance_html(sweek, dates):
                 if c:
                     late = int(c.get("minutes_late") or 0)
                     t = str(c.get("clock_in", ""))[11:16]
+                    b = bidx.get((nm, diso, r["shift"]))
+                    btxt = ""
+                    if b:
+                        if b.get("resume_at"):
+                            dur = int((pd.Timestamp(b["resume_at"]) -
+                                       pd.Timestamp(b["break_start"])).total_seconds() // 60)
+                            over = int(b.get("minutes_over") or 0)
+                            btxt = (f"<span style='color:#F2C070'>☕{dur}m +{over}</span>"
+                                    if over > grace else
+                                    f"<span style='color:#8AA6A0'>☕{dur}m</span>")
+                        else:
+                            btxt = "<span style='color:#5db4ff'>☕ on break</span>"
                     if late > 0:
-                        cells.append(("late", f"⏰<small>{t}</small>+{late}m"))
+                        cells.append(("late", f"⏰<small>{t}</small>+{late}m{btxt}"))
                     else:
-                        cells.append(("ok", f"✓<small>{t}</small>on time"))
+                        cells.append(("ok", f"✓<small>{t}</small>on time{btxt}"))
                 elif d < today:
                     cells.append(("miss", f"✗<small>{r['start']}</small>no check-in"))
                 else:
@@ -1487,6 +1666,12 @@ def race_html(sweek, dates):
             s["mins"] += int(c["minutes_late"])
         else:
             s["ok"] += 1
+    # over-break minutes count as pit time too (beyond the grace window)
+    _grace = int(load_settings().get("break_grace", 5))
+    for b in (db_fetch_breaks(tuple(d.isoformat() for d in dates)) if db_enabled() else []):
+        over = int(b.get("minutes_over") or 0)
+        if over > _grace and b["employee"] in stats:
+            stats[b["employee"]]["mins"] += over
     css = """<style>
     .gp{background:linear-gradient(165deg,rgba(22,44,52,.94),rgba(15,32,38,.94));
       border:1px solid rgba(80,190,180,.2);border-radius:18px;padding:16px 18px;margin:14px 0 6px;
@@ -2260,6 +2445,25 @@ def render_admin():
             st.rerun()
         st.caption("Staff can check in from this many minutes before their shift starts. "
                    "Late check-ins are always allowed and recorded with minutes late.")
+
+        st.markdown("##### ☕ Break time")
+        bc1, bc2, bc3 = st.columns([1.4, 1.4, 1])
+        new_bmin = bc1.number_input("Break length (minutes)", min_value=15, max_value=180,
+                                    step=5, value=int(stt.get("break_min", 60)),
+                                    key="break_min_setting")
+        new_grace = bc2.number_input("Grace (minutes)", min_value=0, max_value=30,
+                                     step=1, value=int(stt.get("break_grace", 5)),
+                                     key="break_grace_setting")
+        bc3.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+        if bc3.button("💾 Save break", key="save_break_cfg"):
+            stt["break_min"] = int(new_bmin)
+            stt["break_grace"] = int(new_grace)
+            save_settings(stt)
+            st.success(f"Break set to {int(new_bmin)} min (+{int(new_grace)} min grace).")
+            st.rerun()
+        st.caption("Staff tap ☕ Start break when leaving and 🔙 Resume (geofenced, at the "
+                   "shop) when back. Over-break minutes are recorded and count as pit-stop "
+                   "time in the Grand Prix.")
 
         st.markdown("##### 📍 Branch check-in geofences (GPS)")
         st.caption("Stand at each branch, tap **Get my current GPS**, type the numbers into that "
