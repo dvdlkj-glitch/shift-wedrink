@@ -73,7 +73,7 @@ st.set_page_config(page_title="WeDrink Sabah — Shift Dashboard",
                    page_icon="🧋", layout="wide")
 
 # Build marker — bump when debugging deploys to confirm which code Cloud runs.
-APP_BUILD = "b21-2026-07-23"
+APP_BUILD = "b22-2026-07-28"
 
 DEFAULT_ADMIN_USER = "admin"
 DEFAULT_ADMIN_PW = "wedrink2026"
@@ -2119,9 +2119,167 @@ def render_assign_form():
                 st.rerun()
 
 
+ADMIN_ATTENDANT = "Korin Chin"
+
+
+@st.cache_data(ttl=10, show_spinner=False)
+def db_fetch_admin_checkins(limit=40):
+    """Korin's private attendance rows, newest first."""
+    if not db_enabled():
+        return []
+    q = urlencode({"select": "*", "admin_name": f"eq.{ADMIN_ATTENDANT}",
+                   "order": "work_date.desc", "limit": str(limit)})
+    code, text = _sb_request(f"admin_checkins?{q}", "GET")
+    if code == 200:
+        try:
+            return json.loads(text)
+        except Exception:
+            return []
+    return []
+
+
+def admin_checkin_html(branch, site):
+    """Geofenced check-in button for the admin — writes to admin_checkins
+    (private table, never shown in staff views). One check-in per day."""
+    url, key = _sb()
+    now = now_myt()
+    ctx = json.dumps({
+        "sb": {"url": url or "", "key": key or ""},
+        "name": ADMIN_ATTENDANT, "date": now.date().isoformat(),
+        "branch": branch, "branchLabel": loc_label(branch),
+        "site": {"lat": float(site["lat"]), "lng": float(site["lng"]),
+                 "radius": float(site.get("radius_m", 20))},
+        "maxAcc": MAX_ACCURACY_M,
+        "nowMin": int(now.hour * 60 + now.minute),
+    })
+    tmpl = """
+<div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif">
+  <button id="abtn" style="width:100%;min-height:56px;border:none;border-radius:14px;
+    font-size:16px;font-weight:700;color:#231202;cursor:pointer;
+    background:linear-gradient(135deg,#F2A03D,#E5851C);box-shadow:0 8px 22px rgba(242,160,61,.3)">
+    📍 Check in at __BRANCH__
+  </button>
+  <div id="amsg" style="margin-top:10px;font-size:14px;color:#8AA6A0;min-height:20px;line-height:1.5"></div>
+</div>
+<script>
+(function(){
+  var C=__CTX__;
+  var t0=Date.now();
+  var b=document.getElementById('abtn'), m=document.getElementById('amsg');
+  function hhmm(mins){ mins=Math.max(0,Math.round(mins))%1440;
+    return ('0'+Math.floor(mins/60)).slice(-2)+':'+('0'+(mins%60)).slice(-2); }
+  function hav(a,b2,c,d){ var R=6371000,p=Math.PI/180;
+    var x=Math.sin((c-a)*p/2), y=Math.sin((d-b2)*p/2);
+    var h=x*x+Math.cos(a*p)*Math.cos(c*p)*y*y; return 2*R*Math.asin(Math.sqrt(h)); }
+  function ok(html){ m.style.color='#67E0A3'; m.innerHTML=html; }
+  function bad(html){ m.style.color='#F2A0A0'; m.innerHTML=html;
+    b.disabled=false; b.style.opacity=1; }
+  function hdrs(){ return {apikey:C.sb.key, Authorization:'Bearer '+C.sb.key,
+                          'Content-Type':'application/json'}; }
+  b.onclick=function(){
+    if(!C.sb.url||!C.sb.key){ bad('Storage not configured.'); return; }
+    if(!navigator.geolocation){ bad('This device does not support GPS.'); return; }
+    b.disabled=true; b.style.opacity=.6; m.style.color='#8AA6A0';
+    m.textContent='Getting your location…';
+    navigator.geolocation.getCurrentPosition(function(pos){
+      var lat=pos.coords.latitude, lng=pos.coords.longitude, acc=Math.round(pos.coords.accuracy);
+      if(acc>C.maxAcc){ bad('GPS signal too weak (±'+acc+' m). Move near a window and retry.'); return; }
+      var dist=Math.round(hav(lat,lng,C.site.lat,C.site.lng));
+      if(dist>C.site.radius){ bad('You are about '+dist+' m from '+C.branchLabel+
+        ' (must be within '+Math.round(C.site.radius)+' m). Move closer, or pick the '+
+        'branch you are actually at.'); return; }
+      var nm=C.nowMin+(Date.now()-t0)/60000;
+      var stamp=C.date+' '+hhmm(nm);
+      m.textContent='Saving…';
+      var qs='work_date=eq.'+C.date+'&admin_name=eq.'+encodeURIComponent(C.name);
+      fetch(C.sb.url+'/rest/v1/admin_checkins?select=clock_in,branch&'+qs,{headers:hdrs()})
+      .then(function(r){return r.json();})
+      .then(function(rows){
+        if(Array.isArray(rows)&&rows.length){
+          ok('✓ Already checked in today at <b>'+rows[0].clock_in+'</b> ('+rows[0].branch+').');
+          return null;
+        }
+        return fetch(C.sb.url+'/rest/v1/admin_checkins?on_conflict=work_date,admin_name',{
+          method:'POST',
+          headers:Object.assign(hdrs(),{Prefer:'resolution=ignore-duplicates,return=minimal'}),
+          body:JSON.stringify([{work_date:C.date, admin_name:C.name, branch:C.branch,
+            clock_in:stamp, lat:+lat.toFixed(6), lng:+lng.toFixed(6),
+            accuracy_m:acc, distance_m:dist}])
+        }).then(function(resp){
+          if(resp.status===201||resp.status===200||resp.status===204){
+            ok('✓ <b>'+C.name+'</b> checked in at <b>'+stamp+'</b> · '+C.branchLabel+
+               ' · '+dist+' m from the shop.<br><span style="color:#8AA6A0">Recorded — '
+               +'refresh the page to see it in your history.</span>');
+          } else { bad('Could not save — please try again. ('+resp.status+')'); }
+        });
+      })
+      .catch(function(){ bad('Network problem — check your connection and tap again.'); });
+    }, function(err){
+      var t={1:'Location permission denied — allow location and retry.',
+             2:'Position unavailable — move near a window.', 3:'Timed out — try again.'};
+      bad(t[err.code]||('Location error: '+err.message));
+    }, {enableHighAccuracy:true, timeout:12000, maximumAge:0});
+  };
+})();
+</script>
+"""
+    return tmpl.replace("__CTX__", ctx).replace("__BRANCH__", loc_label(branch))
+
+
+def render_admin_attendance():
+    """Private attendance tracking for Korin Chin — admin-login only, own
+    table, never shown in any staff view."""
+    st.subheader(f"📍 My Attendance — {ADMIN_ATTENDANT}")
+    st.caption("Private to the admin area: one geofenced check-in per day at whichever "
+               "branch you're starting from. Staff pages never show these records.")
+    if not db_enabled():
+        st.warning("Supabase isn't connected — admin attendance needs the database.")
+        return
+    rows = db_fetch_admin_checkins()
+    today = now_myt().date().isoformat()
+    mine_today = next((r for r in rows if str(r["work_date"]) == today), None)
+    if mine_today:
+        st.success(f"✓ Checked in today at **{mine_today['clock_in']}** · "
+                   f"{loc_label(mine_today['branch'])} · "
+                   f"{round(mine_today.get('distance_m') or 0)} m from the shop.")
+    else:
+        sites = load_sites()
+        confd = [l for l in config["locations"] if sites.get(l, {}).get("configured")]
+        if not confd:
+            st.error("No branch geofence configured yet (Setup).")
+            return
+        c1, _ = st.columns([1.6, 2])
+        branch = c1.selectbox("Which branch are you at?", confd,
+                              format_func=loc_label, key="adm_ci_branch")
+        components.html(admin_checkin_html(branch, sites[branch]), height=150)
+
+    st.markdown("##### 🗓️ History")
+    if not rows:
+        st.info("No check-ins recorded yet — today's will be the first!")
+        return
+    month = today[:7]
+    days_this_month = sum(1 for r in rows if str(r["work_date"]).startswith(month))
+    k1, k2 = st.columns(2)
+    k1.metric("Days checked in this month", days_this_month)
+    k2.metric("Latest", f"{rows[0]['work_date']} {str(rows[0]['clock_in'])[11:16]}")
+    hist = pd.DataFrame([{
+        "Date": str(r["work_date"]),
+        "Day": pd.Timestamp(r["work_date"]).strftime("%a"),
+        "Time": str(r["clock_in"])[11:16],
+        "Branch": loc_label(r["branch"]),
+        "Distance": (f"{round(r.get('distance_m') or 0)} m"
+                     if r.get("distance_m") is not None else "—"),
+    } for r in rows])
+    st.dataframe(hist, width="stretch", hide_index=True)
+
+
 def render_admin():
-    tab_sched, tab_clock, tab_perf, tab_setup, tab_settings = st.tabs(
-        ["📅 Schedule", "⏱️ Clock In / Out", "📊 Performance", "⚙️ Setup", "🔑 Settings"])
+    tab_sched, tab_clock, tab_perf, tab_me, tab_setup, tab_settings = st.tabs(
+        ["📅 Schedule", "⏱️ Clock In / Out", "📊 Performance", "📍 My Attendance",
+         "⚙️ Setup", "🔑 Settings"])
+
+    with tab_me:
+        render_admin_attendance()
 
     with tab_sched:
         # ---- Week context bar (which week am I arranging?) ----
