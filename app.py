@@ -73,7 +73,7 @@ st.set_page_config(page_title="WeDrink Sabah — Shift Dashboard",
                    page_icon="🧋", layout="wide")
 
 # Build marker — bump when debugging deploys to confirm which code Cloud runs.
-APP_BUILD = "b22-2026-07-28"
+APP_BUILD = "b23-2026-08-01"
 
 DEFAULT_ADMIN_USER = "admin"
 DEFAULT_ADMIN_PW = "wedrink2026"
@@ -106,9 +106,55 @@ def verify_admin(user, pw):
     return user.strip() == a["user"] and _hash(pw) == a["hash"]
 
 
-@st.cache_data
+EMP_COLS = ["name", "type", "locations", "is_core", "no_off_day", "pin"]
+
+
+@st.cache_data(ttl=15)
 def load_employees():
-    return pd.read_csv(EMP_CSV)
+    """Roster from Supabase when configured (durable — fixes staff additions
+    vanishing on redeploy); falls back to the repo CSV."""
+    if db_enabled():
+        code, text = _sb_request("employees?select=*&order=emp_type,name", "GET")
+        if code == 200:
+            try:
+                rows = json.loads(text)
+                if rows:
+                    df = pd.DataFrame(rows).rename(columns={"emp_type": "type"})
+                    for c in EMP_COLS:
+                        if c not in df.columns:
+                            df[c] = "" if c in ("locations", "pin") else False
+                    return df[EMP_COLS].fillna("")
+            except Exception:
+                pass
+    df = pd.read_csv(EMP_CSV)
+    if "pin" not in df.columns:
+        df["pin"] = ""
+    return df.fillna("")
+
+
+def save_employees(df):
+    """Replace the roster in Supabase (durable), else write the CSV."""
+    if db_enabled():
+        _sb_request("employees?id=gt.0", "DELETE", extra_headers={"Prefer": "return=minimal"})
+        recs = []
+        for _, r in df.iterrows():
+            nm = str(r.get("name", "")).strip()
+            if not nm:
+                continue
+            recs.append({
+                "name": nm, "emp_type": str(r.get("type", "full") or "full"),
+                "locations": str(r.get("locations", "") or ""),
+                "is_core": str(r.get("is_core", "")).strip().lower() in ("true", "1", "yes"),
+                "no_off_day": str(r.get("no_off_day", "")).strip().lower() in ("true", "1", "yes"),
+                "pin": str(r.get("pin", "") or "").strip(),
+            })
+        code, text = _sb_request("employees", "POST", body=recs,
+                                 extra_headers={"Prefer": "return=minimal"})
+        load_employees.clear()
+        return code in (200, 201, 204), (None if code in (200, 201, 204) else f"{code}: {text}")
+    df.to_csv(EMP_CSV, index=False)
+    load_employees.clear()
+    return True, None
 
 
 def load_config():
@@ -293,7 +339,7 @@ def pick_checkin_target(todays, now_min, window):
     return None, "empty", None
 
 
-def geo_checkin_html(r, site, win_min, now_min):
+def geo_checkin_html(r, site, win_min, now_min, pin=""):
     """Self-contained check-in button: captures GPS, validates geofence + time
     window, and writes the record straight to Supabase — all inside the
     component iframe. (Streamlit sandboxes components without
@@ -311,9 +357,15 @@ def geo_checkin_html(r, site, win_min, now_min):
                  "radius": float(site.get("radius_m", 20))},
         "maxAcc": MAX_ACCURACY_M,
         "nowMin": int(now_min),          # server MYT minutes at render; JS adds elapsed
+        "pinHash": (hashlib.sha256(str(pin).strip().encode()).hexdigest()
+                    if str(pin).strip() else ""),
     })
     tmpl = """
 <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif">
+  <input id="gpin" type="tel" inputmode="numeric" maxlength="4" placeholder="Your 4-digit PIN"
+    style="display:none;width:100%;padding:13px 14px;margin-bottom:9px;background:#0c1720;
+    border:1px solid rgba(80,190,180,.3);border-radius:11px;color:#E9F3F1;font-size:17px;
+    letter-spacing:6px;text-align:center;font-weight:700">
   <button id="gbtn" style="width:100%;min-height:58px;border:none;border-radius:14px;
     font-size:17px;font-weight:700;color:#06231f;cursor:pointer;
     background:linear-gradient(135deg,#37D7D0,#1C9C96);box-shadow:0 8px 22px rgba(55,215,208,.35)">
@@ -326,6 +378,11 @@ def geo_checkin_html(r, site, win_min, now_min):
   var C=__CTX__;
   var t0=Date.now();
   var b=document.getElementById('gbtn'), m=document.getElementById('gmsg');
+  var pinEl=document.getElementById('gpin');
+  if(C.pinHash) pinEl.style.display='block';
+  function sha256(s){ return crypto.subtle.digest('SHA-256', new TextEncoder().encode(s))
+    .then(function(buf){ return Array.from(new Uint8Array(buf))
+      .map(function(x){return ('0'+x.toString(16)).slice(-2);}).join(''); }); }
   function nowMin(){ return C.nowMin + (Date.now()-t0)/60000; }
   function hhmm(mins){ mins=Math.max(0,Math.round(mins))%1440;
     return ('0'+Math.floor(mins/60)).slice(-2)+':'+('0'+(mins%60)).slice(-2); }
@@ -343,7 +400,20 @@ def geo_checkin_html(r, site, win_min, now_min):
   b.onclick=function(){
     if(!C.sb.url||!C.sb.key){ bad('Check-in storage is not configured — tell your admin.'); return; }
     if(!navigator.geolocation){ bad('This device does not support GPS.'); return; }
+    if(C.pinHash){
+      var pv=(pinEl.value||'').trim();
+      if(!pv){ bad('Enter your 4-digit PIN first — this confirms it's really you.'); return; }
+      b.disabled=true; b.style.opacity=.6;
+      sha256(pv).then(function(h){
+        if(h!==C.pinHash){ bad('Wrong PIN — check with your admin if you forgot it.'); return; }
+        proceed();
+      });
+      return;
+    }
     b.disabled=true; b.style.opacity=.6;
+    proceed();
+  };
+  function proceed(){
     m.style.color='#8AA6A0'; m.textContent='Getting your location…';
     navigator.geolocation.getCurrentPosition(function(pos){
       var lat=pos.coords.latitude, lng=pos.coords.longitude,
@@ -391,7 +461,7 @@ def geo_checkin_html(r, site, win_min, now_min):
              3:'Timed out — please try again.'};
       bad(t[err.code]||('Location error: '+err.message));
     }, {enableHighAccuracy:true, timeout:12000, maximumAge:0});
-  };
+  }
 })();
 </script>
 """
@@ -604,12 +674,13 @@ def db_fetch_breaks(dates_tuple):
     return []
 
 
-def break_begin(diso, emp, shift):
+def break_begin(diso, emp, shift, break_no=1):
     """Start a break (server-side; leaving the shop needs no geofence)."""
     if not db_enabled():
         return False, "Supabase not configured"
-    code, text = _sb_request("breaks?on_conflict=work_date,employee,shift", "POST",
-                             body=[{"work_date": diso, "employee": emp, "shift": shift}],
+    code, text = _sb_request("breaks?on_conflict=work_date,employee,shift,break_no", "POST",
+                             body=[{"work_date": diso, "employee": emp, "shift": shift,
+                                    "break_no": int(break_no)}],
                              extra_headers={"Prefer": "resolution=ignore-duplicates,return=minimal"})
     if code in (200, 201, 204):
         db_fetch_breaks.clear()
@@ -632,6 +703,7 @@ def break_resume_html(brk, r, site):
         "breakMin": int(stt.get("break_min", 60)),
         "graceMin": int(stt.get("break_grace", 5)),
         "startEpochMs": int(pd.Timestamp(brk["break_start"]).timestamp() * 1000),
+        "breakNo": int(brk.get("break_no") or 1),
     })
     tmpl = """
 <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif">
@@ -667,7 +739,7 @@ def break_resume_html(brk, r, site):
       var over=Math.max(0, Math.round(elapsedMin - C.breakMin));
       m.textContent='Saving…';
       var qs='work_date=eq.'+C.date+'&employee=eq.'+encodeURIComponent(C.emp)+
-             '&shift=eq.'+encodeURIComponent(C.shift);
+             '&shift=eq.'+encodeURIComponent(C.shift)+'&break_no=eq.'+C.breakNo;
       fetch(C.sb.url+'/rest/v1/breaks?'+qs,{
         method:'PATCH',
         headers:Object.assign(hdrs(),{Prefer:'return=minimal'}),
@@ -680,6 +752,88 @@ def break_resume_html(brk, r, site):
           ok('✓ Welcome back! Break was <b>'+dur+' min</b> · '+
              (over<=C.graceMin?'✅ within break time':'⏰ <b>'+over+' min</b> over')+
              ' · '+dist+' m from the shop.<br><span style="color:#8AA6A0">Recorded.</span>');
+        } else { bad('Could not save — tap to try again. ('+resp.status+')'); }
+      }).catch(function(){ bad('Network problem — check your connection and tap again.'); });
+    }, function(err){
+      var t={1:'Location permission denied — allow location and retry.',
+             2:'Position unavailable — move near a window.', 3:'Timed out — try again.'};
+      bad(t[err.code]||('Location error: '+err.message));
+    }, {enableHighAccuracy:true, timeout:12000, maximumAge:0});
+  };
+})();
+</script>
+"""
+    return tmpl.replace("__CTX__", ctx)
+
+
+def clockout_html(r, site):
+    """End-of-shift clock-out button: GPS + geofence enforced in the component
+    iframe, PATCHes the day's check-in row with clock_out + GPS."""
+    url, key = _sb()
+    now = now_myt()
+    ctx = json.dumps({
+        "sb": {"url": url or "", "key": key or ""},
+        "emp": str(r["employee"]), "date": str(r["date"]), "shift": str(r["shift"]),
+        "branchLabel": loc_label(r["location"]), "end": str(r["end"]),
+        "site": {"lat": float(site["lat"]), "lng": float(site["lng"]),
+                 "radius": float(site.get("radius_m", 20))},
+        "maxAcc": MAX_ACCURACY_M,
+        "nowMin": int(now.hour * 60 + now.minute),
+        "ciIn": str(r.get("clock_in", "")),
+    })
+    tmpl = """
+<div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif">
+  <button id="obtn" style="width:100%;min-height:56px;border:none;border-radius:14px;
+    font-size:16px;font-weight:700;color:#fff;cursor:pointer;
+    background:linear-gradient(135deg,#e2635b,#c74438);box-shadow:0 8px 22px rgba(226,99,91,.28)">
+    🔴 Clock out — end my shift
+  </button>
+  <div id="omsg" style="margin-top:10px;font-size:14px;color:#8AA6A0;min-height:20px;line-height:1.5"></div>
+</div>
+<script>
+(function(){
+  var C=__CTX__;
+  var t0=Date.now();
+  var b=document.getElementById('obtn'), m=document.getElementById('omsg');
+  function hhmm(mins){ mins=Math.max(0,Math.round(mins))%1440;
+    return ('0'+Math.floor(mins/60)).slice(-2)+':'+('0'+(mins%60)).slice(-2); }
+  function hav(a,b2,c,d){ var R=6371000,p=Math.PI/180;
+    var x=Math.sin((c-a)*p/2), y=Math.sin((d-b2)*p/2);
+    var h=x*x+Math.cos(a*p)*Math.cos(c*p)*y*y; return 2*R*Math.asin(Math.sqrt(h)); }
+  function ok(html){ m.style.color='#67E0A3'; m.innerHTML=html; }
+  function bad(html){ m.style.color='#F2A0A0'; m.innerHTML=html; b.disabled=false; b.style.opacity=1; }
+  function hdrs(){ return {apikey:C.sb.key, Authorization:'Bearer '+C.sb.key,
+                          'Content-Type':'application/json'}; }
+  b.onclick=function(){
+    if(!navigator.geolocation){ bad('This device does not support GPS.'); return; }
+    b.disabled=true; b.style.opacity=.6; m.style.color='#8AA6A0';
+    m.textContent='Getting your location…';
+    navigator.geolocation.getCurrentPosition(function(pos){
+      var lat=pos.coords.latitude, lng=pos.coords.longitude, acc=Math.round(pos.coords.accuracy);
+      if(acc>C.maxAcc){ bad('GPS signal too weak (±'+acc+' m). Move near a window and retry.'); return; }
+      var dist=Math.round(hav(lat,lng,C.site.lat,C.site.lng));
+      if(dist>C.site.radius){ bad('You are about '+dist+' m from '+C.branchLabel+
+        ' (must be within '+Math.round(C.site.radius)+' m to clock out). Move closer and retry.'); return; }
+      var nm=C.nowMin+(Date.now()-t0)/60000;
+      var stamp=C.date+' '+hhmm(nm);
+      m.textContent='Saving…';
+      var qs='work_date=eq.'+C.date+'&employee=eq.'+encodeURIComponent(C.emp)+
+             '&shift=eq.'+encodeURIComponent(C.shift);
+      fetch(C.sb.url+'/rest/v1/check_ins?'+qs,{
+        method:'PATCH',
+        headers:Object.assign(hdrs(),{Prefer:'return=minimal'}),
+        body:JSON.stringify({clock_out:stamp, co_lat:+lat.toFixed(6), co_lng:+lng.toFixed(6),
+                             co_acc:acc, co_dist:dist})
+      }).then(function(resp){
+        if(resp.status===200||resp.status===204){
+          var worked='';
+          try{
+            var inM=parseInt(C.ciIn.slice(11,13),10)*60+parseInt(C.ciIn.slice(14,16),10);
+            var w=(Math.round(nm)-inM+1440)%1440;
+            worked=' · worked '+Math.floor(w/60)+'h '+(w%60)+'m';
+          }catch(e){}
+          ok('✓ Clocked out at <b>'+stamp+'</b> · '+C.branchLabel+worked+
+             '.<br><span style="color:#8AA6A0">See you next shift! 🧋</span>');
         } else { bad('Could not save — tap to try again. ('+resp.status+')'); }
       }).catch(function(){ bad('Network problem — check your connection and tap again.'); });
     }, function(err){
@@ -735,13 +889,15 @@ def overlay_checkins(df):
         c = idx.get((r["employee"], str(r["date"]), r["shift"]))
         if c:
             out.at[i, "clock_in"] = c.get("clock_in", "") or ""
+            out.at[i, "clock_out"] = c.get("clock_out", "") or ""
             out.at[i, "ci_lat"] = "" if c.get("lat") is None else str(c["lat"])
             out.at[i, "ci_lng"] = "" if c.get("lng") is None else str(c["lng"])
             out.at[i, "ci_acc"] = "" if c.get("accuracy_m") is None else str(round(c["accuracy_m"]))
             out.at[i, "ci_dist"] = "" if c.get("distance_m") is None else str(round(c["distance_m"]))
-            out.at[i, "ci_method"] = "gps"
+            out.at[i, "ci_method"] = c.get("method", "gps") or "gps"
         else:
             out.at[i, "clock_in"] = ""  # DB is source of truth; ignore ephemeral CSV
+            out.at[i, "clock_out"] = ""
     return out
 
 
@@ -1427,56 +1583,68 @@ def render_checkin_ui():
 
     target, status, open_m = pick_checkin_target(todays, now_min, win)
     if status == "done":
-        st.success("You're all checked in for today — have a great shift! 🧋")
-        # ---- Break time flow: start break -> resume (geofenced) ----
         done_shifts = todays[todays["clock_in"].astype(str).str.strip() != ""]
-        if not done_shifts.empty and db_enabled():
-            cur = done_shifts.sort_values("start").iloc[-1]   # current shift
+        cur = done_shifts.sort_values("start").iloc[-1]   # current shift
+        clocked_out = str(cur.get("clock_out", "")).strip()
+        if clocked_out:
+            st.success(f"🏁 Shift complete — in {str(cur['clock_in'])[11:16]}, "
+                       f"out {clocked_out[11:16]}. See you next shift! 🧋")
+            return
+        st.success("You're all checked in for today — have a great shift! 🧋")
+        if db_enabled():
             stt = load_settings()
             bmin = int(stt.get("break_min", 60))
             grace = int(stt.get("break_grace", 5))
-            brks = db_fetch_breaks((today.isoformat(),))
-            mybrk = next((b for b in brks
-                          if b["employee"] == who and b["shift"] == cur["shift"]), None)
+            brks = sorted([b for b in db_fetch_breaks((today.isoformat(),))
+                           if b["employee"] == who and b["shift"] == cur["shift"]],
+                          key=lambda b: int(b.get("break_no") or 1))
+            active = next((b for b in brks if not b.get("resume_at")), None)
+            site2 = load_sites().get(cur["location"], {})
             st.markdown("---")
-            if mybrk is None:
-                st.markdown(f"**☕ Break time** — you have **{bmin} min**; tap when you "
-                            "leave, and Resume (at the shop) when you're back.")
-                if st.button("☕ Start my break", type="secondary", width="stretch",
-                             key="brk_start"):
-                    ok2, err2 = break_begin(today.isoformat(), who, cur["shift"])
-                    if ok2:
-                        st.toast(f"Break started — see you in {bmin} minutes! ☕")
-                        st.rerun()
-                    else:
-                        st.error(f"Could not start break: {err2}")
-            elif not mybrk.get("resume_at"):
-                start_ts = pd.Timestamp(mybrk["break_start"])
+            if active:
+                bn = int(active.get("break_no") or 1)
+                start_ts = pd.Timestamp(active["break_start"])
                 elapsed = max(0, int((pd.Timestamp.now(tz="UTC") -
                                       start_ts).total_seconds() // 60))
                 due = (start_ts + pd.Timedelta(minutes=bmin)).tz_convert("Asia/Kuching")
                 left = bmin - elapsed
+                lbl = "1st" if bn == 1 else "2nd"
                 if left >= 0:
-                    st.info(f"☕ On break for **{elapsed} min** — resume by "
+                    st.info(f"☕ On your {lbl} break for **{elapsed} min** — resume by "
                             f"**{due.strftime('%H:%M')}** ({left} min left).")
                 else:
-                    st.warning(f"☕ On break for **{elapsed} min** — **{-left} min over**! "
+                    st.warning(f"☕ {lbl} break for **{elapsed} min** — **{-left} min over**! "
                                "Head back and tap Resume at the shop.")
-                site2 = load_sites().get(cur["location"], {})
                 if site2.get("configured"):
-                    components.html(break_resume_html(mybrk, cur, site2), height=160)
+                    components.html(break_resume_html(active, cur, site2), height=160)
                 else:
                     st.error("Branch geofence not set — ask your admin.")
+                return
+            # no active break -> summary of finished breaks + next actions
+            for b in brks:
+                dur = int((pd.Timestamp(b["resume_at"]) -
+                           pd.Timestamp(b["break_start"])).total_seconds() // 60)
+                over = int(b.get("minutes_over") or 0)
+                bn = int(b.get("break_no") or 1)
+                tag = (f"⏰ {over} min over" if over > grace else "✅ within time")
+                st.caption(f"☕ Break {bn}: {dur} min · {tag}")
+            c_brk, c_out = st.columns(2)
+            if len(brks) < 2:
+                nxt = len(brks) + 1
+                lbl = "☕ Start my break" if nxt == 1 else "☕ Start 2nd break"
+                if c_brk.button(f"{lbl} ({bmin} min)", width="stretch", key=f"brk_start{nxt}"):
+                    ok2, err2 = break_begin(today.isoformat(), who, cur["shift"], nxt)
+                    if ok2:
+                        st.toast(f"Break {nxt} started — see you in {bmin} minutes! ☕")
+                        st.rerun()
+                    else:
+                        st.error(f"Could not start break: {err2}")
+            with c_out:
+                st.caption("Done for the day? Clock out below (at the shop).")
+            if site2.get("configured"):
+                components.html(clockout_html(cur, site2), height=150)
             else:
-                dur = int((pd.Timestamp(mybrk["resume_at"]) -
-                           pd.Timestamp(mybrk["break_start"])).total_seconds() // 60)
-                over = int(mybrk.get("minutes_over") or 0)
-                if over <= grace:
-                    st.success(f"☕ Break done — {dur} min, ✅ within break time. "
-                               "Back on shift!")
-                else:
-                    st.warning(f"☕ Break done — {dur} min, ⏰ {over} min over. "
-                               "Recorded; back on shift!")
+                st.error("Branch geofence not set — ask your admin.")
         return
     if status == "too_early":
         st.info(f"⏳ Check-in for your **{target['shift']}** shift ({target['start']}) opens at "
@@ -1500,7 +1668,14 @@ def render_checkin_ui():
                  "late check-in." if late > 0 else "")
     st.markdown(f"**Checking in to {loc_label(branch)} — {SHIFT_ICON.get(r['shift'],'')} "
                 f"{r['shift']} shift.** You must be within **{radius} m** of the shop.{late_note}")
-    components.html(geo_checkin_html(r, site, win, now_min), height=160)
+    _pin = ""
+    try:
+        _row = employees[employees["name"] == who]
+        _pin = str(_row.iloc[0].get("pin", "") or "") if not _row.empty else ""
+    except Exception:
+        _pin = ""
+    components.html(geo_checkin_html(r, site, win, now_min, pin=_pin),
+                    height=220 if _pin.strip() else 160)
     st.caption("Your location is captured only when you tap the button, and only used to "
                "confirm you're at the branch. Works on the deployed https:// link "
                "(phone browser will ask for location permission).")
@@ -1558,7 +1733,9 @@ def attendance_html(sweek, dates):
     cks = db_fetch_checkins(tuple(d.isoformat() for d in dates)) if db_enabled() else []
     idx = {(c["employee"], str(c["work_date"]), c["shift"]): c for c in cks}
     brks = db_fetch_breaks(tuple(d.isoformat() for d in dates)) if db_enabled() else []
-    bidx = {(b["employee"], str(b["work_date"]), b["shift"]): b for b in brks}
+    bidx = {}
+    for b in brks:
+        bidx.setdefault((b["employee"], str(b["work_date"]), b["shift"]), []).append(b)
     grace = int(load_settings().get("break_grace", 5))
     staff = sorted(sweek["employee"].unique(),
                    key=lambda n: (emp_type(n) != "full", n))
@@ -1613,18 +1790,21 @@ def attendance_html(sweek, dates):
                 if c:
                     late = int(c.get("minutes_late") or 0)
                     t = str(c.get("clock_in", ""))[11:16]
-                    b = bidx.get((nm, diso, r["shift"]))
                     btxt = ""
-                    if b:
+                    for b in sorted(bidx.get((nm, diso, r["shift"]), []),
+                                    key=lambda x: int(x.get("break_no") or 1)):
                         if b.get("resume_at"):
                             dur = int((pd.Timestamp(b["resume_at"]) -
                                        pd.Timestamp(b["break_start"])).total_seconds() // 60)
                             over = int(b.get("minutes_over") or 0)
-                            btxt = (f"<span style='color:#F2C070'>☕{dur}m +{over}</span>"
-                                    if over > grace else
-                                    f"<span style='color:#8AA6A0'>☕{dur}m</span>")
+                            btxt += (f"<span style='color:#F2C070'>☕{dur}m +{over}</span>"
+                                     if over > grace else
+                                     f"<span style='color:#8AA6A0'>☕{dur}m</span>")
                         else:
-                            btxt = "<span style='color:#5db4ff'>☕ on break</span>"
+                            btxt += "<span style='color:#5db4ff'>☕ on break</span>"
+                    co = str(c.get("clock_out") or "")[11:16]
+                    if co:
+                        btxt += f"<span style='color:#8AA6A0'>⏹{co}</span>"
                     if late > 0:
                         cells.append(("late", f"⏰<small>{t}</small>+{late}m{btxt}"))
                     else:
@@ -2445,64 +2625,165 @@ def render_admin():
                 st.session_state.schedule = pd.concat([other, edited], ignore_index=True)[SCHED_COLS]
 
     with tab_clock:
-        st.subheader("Clock In / Out")
-        st.caption("Stamp current Sabah time with one click, or type it. Format: YYYY-MM-DD HH:MM")
-        st.caption("🟢 Supabase — check-ins saved to the cloud database (survive redeploys)."
+        st.subheader("📋 Attendance records")
+        st.caption("🟢 Supabase — everything staff record (clock-in, breaks, clock-out) "
+                   "for any day, plus manual corrections for GPS/distance problems."
                    if db_enabled() else
-                   "⚪ Local CSV — check-ins are temporary until Supabase secrets are added.")
-        sched = st.session_state.schedule
-        if sched.empty:
-            st.info("Generate a schedule first.")
+                   "⚪ Local CSV mode — connect Supabase for live records.")
+        rec_day = st.date_input("Day", value=now_myt().date(), key="rec_day").isoformat()
+        day_sh = st.session_state.schedule
+        day_sh = day_sh[day_sh.date == rec_day].sort_values(["location", "start"])
+        cks_d = {(c["employee"], c["shift"]): c
+                 for c in (db_fetch_checkins((rec_day,)) if db_enabled() else [])}
+        brk_d = {}
+        for b in (db_fetch_breaks((rec_day,)) if db_enabled() else []):
+            brk_d.setdefault((b["employee"], b["shift"]), {})[int(b.get("break_no") or 1)] = b
+
+        def _hm(ts):
+            s = str(ts or "")
+            if not s:
+                return ""
+            if "T" in s or "+" in s:
+                try:
+                    return pd.Timestamp(s).tz_convert("Asia/Kuching").strftime("%H:%M")
+                except Exception:
+                    return s[11:16]
+            return s[11:16]
+
+        if day_sh.empty:
+            st.info("No shifts scheduled on this day.")
         else:
-            d_sel = st.selectbox("Day", [d.isoformat() for d in DATES],
-                                 format_func=lambda x: datetime.strptime(x, "%Y-%m-%d").strftime("%a %d %b"))
-            day_rows = overlay_checkins(sched[sched.date == d_sel])
-            if day_rows.empty:
-                st.info("No shifts on this day.")
-            st.caption("📍 = staff GPS self-check-in (distance from branch centre shown) · "
-                       "⏰ = minutes late vs shift start.")
-            for idx, r in day_rows.iterrows():
-                cols = st.columns([2.4, 1.4, 1.4, 1, 1])
-                gps = ""
-                if str(r.get("ci_method", "")) == "gps":
-                    gps = f" · 📍GPS {r.get('ci_dist','?')}m"
-                lm = late_minutes(r["clock_in"], r["start"]) if str(r["clock_in"]).strip() else None
-                if lm is not None:
-                    gps += f" · ⏰{lm}m late" if lm > 0 else " · ✅on time"
-                cols[0].markdown(f"**{r['employee']}** · {SHIFT_ICON.get(r['shift'],'')} {r['shift']} "
-                                 f"· 📍{loc_label(r['location'])} · {r['start']}-{r['end']}{gps}")
-                ci = cols[1].text_input("Clock in", value=r["clock_in"], key=f"ci_{idx}",
-                                        label_visibility="collapsed", placeholder="clock in")
-                co = cols[2].text_input("Clock out", value=r["clock_out"], key=f"co_{idx}",
-                                        label_visibility="collapsed", placeholder="clock out")
-                if not db_enabled():
-                    st.session_state.schedule.at[idx, "clock_in"] = ci
-                    st.session_state.schedule.at[idx, "clock_out"] = co
-                if cols[3].button("🟢 In now", key=f"cin_{idx}"):
-                    stamp = now_myt().strftime("%Y-%m-%d %H:%M")
-                    if db_enabled():
-                        ok, err = db_upsert_checkin(_manual_record(r, stamp))
-                        st.toast("Saved" if ok else f"Save failed: {err}")
+            rows_tbl = []
+            for _, r in day_sh.iterrows():
+                c = cks_d.get((r["employee"], r["shift"]))
+                bs = brk_d.get((r["employee"], r["shift"]), {})
+                b1, b2 = bs.get(1), bs.get(2)
+                rows_tbl.append({
+                    "Staff": r["employee"], "Branch": r["location"], "Shift": r["shift"],
+                    "Sched": f"{r['start']}-{r['end']}",
+                    "Clock in": _hm(c.get("clock_in")) if c else "",
+                    "Late": (f"+{c['minutes_late']}m" if c and (c.get("minutes_late") or 0) > 0
+                             else ("ok" if c else "")),
+                    "B1 out": _hm(b1.get("break_start")) if b1 else "",
+                    "B1 in": _hm(b1.get("resume_at")) if b1 else "",
+                    "B2 out": _hm(b2.get("break_start")) if b2 else "",
+                    "B2 in": _hm(b2.get("resume_at")) if b2 else "",
+                    "Clock out": _hm(c.get("clock_out")) if c else "",
+                    "Src": (c.get("method", "gps") if c else ""),
+                })
+            st.dataframe(pd.DataFrame(rows_tbl), width="stretch", hide_index=True)
+            st.caption("Src: gps = recorded by the staff's phone · manual = keyed in by admin.")
+
+            with st.expander("✏️ Edit / key in a record (for GPS or distance problems)"):
+                opts = [f"{r['employee']} · {r['shift']} ({r['location']})"
+                        for _, r in day_sh.iterrows()]
+                pick = st.selectbox("Record", opts, key="rec_pick")
+                pr = day_sh.iloc[opts.index(pick)]
+                c0 = cks_d.get((pr["employee"], pr["shift"])) or {}
+                bs0 = brk_d.get((pr["employee"], pr["shift"]), {})
+
+                def _pre(v):
+                    return _hm(v) if v else ""
+                e1, e2 = st.columns(2)
+                v_in = e1.text_input("Clock in (HH:MM)", value=_pre(c0.get("clock_in")),
+                                     key="ed_in", placeholder="10:02")
+                v_out = e2.text_input("Clock out (HH:MM)", value=_pre(c0.get("clock_out")),
+                                      key="ed_out", placeholder="19:01")
+                e3, e4, e5, e6 = st.columns(4)
+                v_b1o = e3.text_input("B1 out", value=_pre((bs0.get(1) or {}).get("break_start")),
+                                      key="ed_b1o", placeholder="14:00")
+                v_b1i = e4.text_input("B1 in", value=_pre((bs0.get(1) or {}).get("resume_at")),
+                                      key="ed_b1i", placeholder="15:00")
+                v_b2o = e5.text_input("B2 out", value=_pre((bs0.get(2) or {}).get("break_start")),
+                                      key="ed_b2o", placeholder="")
+                v_b2i = e6.text_input("B2 in", value=_pre((bs0.get(2) or {}).get("resume_at")),
+                                      key="ed_b2i", placeholder="")
+
+                def _valid(v):
+                    v = v.strip()
+                    return (not v) or (_min_of_day(v) is not None)
+
+                def _utc_iso(hhmm_v):
+                    m = _min_of_day(hhmm_v.strip())
+                    base = pd.Timestamp(rec_day, tz="Asia/Kuching") + pd.Timedelta(minutes=m)
+                    return base.tz_convert("UTC").isoformat()
+
+                bA, bB = st.columns([1, 1])
+                if bA.button("💾 Save record", type="primary", key="ed_save"):
+                    vals = [v_in, v_out, v_b1o, v_b1i, v_b2o, v_b2i]
+                    if not all(_valid(v) for v in vals):
+                        st.error("Times must be HH:MM (24h) or blank.")
                     else:
-                        st.session_state.schedule.at[idx, "clock_in"] = stamp
-                        save_schedule(st.session_state.schedule)
+                        errs = []
+                        if v_in.strip():
+                            late_m = max(0, (_min_of_day(v_in) or 0) -
+                                         (_min_of_day(pr["start"]) or 0))
+                            rec = {"work_date": rec_day, "employee": pr["employee"],
+                                   "branch": pr["location"], "shift": pr["shift"],
+                                   "shift_start": pr["start"],
+                                   "clock_in": f"{rec_day} {v_in.strip()}",
+                                   "clock_out": (f"{rec_day} {v_out.strip()}"
+                                                 if v_out.strip() else None),
+                                   "minutes_late": int(late_m), "method": "manual"}
+                            code, text = _sb_request(
+                                "check_ins?on_conflict=work_date,employee,shift", "POST",
+                                body=[rec],
+                                extra_headers={"Prefer":
+                                               "resolution=merge-duplicates,return=minimal"})
+                            if code not in (200, 201, 204):
+                                errs.append(f"check-in: {code} {text[:80]}")
+                        elif v_out.strip() and c0:
+                            code, text = _sb_request(
+                                f"check_ins?work_date=eq.{rec_day}"
+                                f"&employee=eq.{quote(pr['employee'])}"
+                                f"&shift=eq.{quote(pr['shift'])}", "PATCH",
+                                body={"clock_out": f"{rec_day} {v_out.strip()}",
+                                      "method": "manual"},
+                                extra_headers={"Prefer": "return=minimal"})
+                            if code not in (200, 204):
+                                errs.append(f"clock-out: {code}")
+                        bmin_e = int(load_settings().get("break_min", 60))
+                        for bn, (vo, vi) in {1: (v_b1o, v_b1i), 2: (v_b2o, v_b2i)}.items():
+                            if not vo.strip():
+                                continue
+                            over = 0
+                            if vi.strip():
+                                dur = ((_min_of_day(vi) or 0) - (_min_of_day(vo) or 0)) % 1440
+                                over = max(0, dur - bmin_e)
+                            brec = {"work_date": rec_day, "employee": pr["employee"],
+                                    "shift": pr["shift"], "break_no": bn,
+                                    "break_start": _utc_iso(vo),
+                                    "resume_at": _utc_iso(vi) if vi.strip() else None,
+                                    "minutes_over": over if vi.strip() else None}
+                            code, text = _sb_request(
+                                "breaks?on_conflict=work_date,employee,shift,break_no", "POST",
+                                body=[brec],
+                                extra_headers={"Prefer":
+                                               "resolution=merge-duplicates,return=minimal"})
+                            if code not in (200, 201, 204):
+                                errs.append(f"break {bn}: {code}")
+                        db_fetch_checkins.clear()
+                        db_fetch_breaks.clear()
+                        if errs:
+                            st.error(" · ".join(errs))
+                        else:
+                            st.success("Record saved (marked as manual).")
+                            st.rerun()
+                if bB.button("🗑️ Delete this record (wrong-name check-in)", key="ed_del"):
+                    _sb_request(f"check_ins?work_date=eq.{rec_day}"
+                                f"&employee=eq.{quote(pr['employee'])}"
+                                f"&shift=eq.{quote(pr['shift'])}", "DELETE",
+                                extra_headers={"Prefer": "return=minimal"})
+                    _sb_request(f"breaks?work_date=eq.{rec_day}"
+                                f"&employee=eq.{quote(pr['employee'])}"
+                                f"&shift=eq.{quote(pr['shift'])}", "DELETE",
+                                extra_headers={"Prefer": "return=minimal"})
+                    db_fetch_checkins.clear()
+                    db_fetch_breaks.clear()
+                    st.success(f"Deleted {pr['employee']}'s records for {rec_day} — "
+                               "they can check in again with the right name.")
                     st.rerun()
-                if cols[4].button("🔴 Out now", key=f"cout_{idx}"):
-                    st.session_state.schedule.at[idx, "clock_out"] = now_myt().strftime("%Y-%m-%d %H:%M")
-                    save_schedule(st.session_state.schedule)
-                    st.rerun()
-            if st.button("💾 Save clock records", type="primary"):
-                if db_enabled():
-                    saved = 0
-                    for idx, r in day_rows.iterrows():
-                        val = st.session_state.get(f"ci_{idx}", "").strip()
-                        if val:
-                            ok, _ = db_upsert_checkin(_manual_record(r, val))
-                            saved += 1 if ok else 0
-                    st.success(f"Saved {saved} check-in(s) to Supabase.")
-                else:
-                    save_schedule(st.session_state.schedule)
-                    st.success("Clock records saved.")
+
 
     with tab_perf:
         st.subheader("Employee Performance")
@@ -2546,13 +2827,32 @@ def render_admin():
                    "shift requests in data/week_config.json for now.")
         st.markdown("##### 👥 Employees")
         st.caption("locations = semicolon separated (Aeropod;Lintas;Beverly) · "
-                   "is_core = non-consecutive full days · no_off_day = works all 7 days")
+                   "is_core = non-consecutive full days · no_off_day = works all 7 days · "
+                   "**pin** = 4-digit code the staff must enter to check in (blank = no PIN). "
+                   "Saved to the cloud database — additions no longer disappear.")
         ed_emp = st.data_editor(employees, num_rows="dynamic", width="stretch",
-                                hide_index=True, key="emp_editor")
+                                hide_index=True, key="emp_editor",
+                                column_config={
+                                    "type": st.column_config.SelectboxColumn(
+                                        "type", options=["full", "part"]),
+                                    "pin": st.column_config.TextColumn(
+                                        "pin", max_chars=4, help="4-digit check-in PIN"),
+                                })
         if st.button("💾 Save employees"):
-            ed_emp.to_csv(EMP_CSV, index=False)
-            st.cache_data.clear()
-            st.success("Employees saved. Re-generate the schedule to apply.")
+            bad_pin = [str(r["name"]) for _, r in ed_emp.iterrows()
+                       if str(r.get("pin", "")).strip()
+                       and not str(r.get("pin", "")).strip().isdigit()]
+            if bad_pin:
+                st.error("PIN must be digits only — fix: " + ", ".join(bad_pin))
+            else:
+                okE, errE = save_employees(ed_emp)
+                if okE:
+                    st.cache_data.clear()
+                    st.success("Employees saved to the database. "
+                               "Re-generate the schedule to apply roster changes.")
+                    st.rerun()
+                else:
+                    st.error(f"Save failed: {errE}")
         colA, colB = st.columns(2)
         with colA:
             st.markdown("##### 🛌 Off-day applications")

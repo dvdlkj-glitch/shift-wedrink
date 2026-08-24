@@ -80,6 +80,10 @@
   <div class="card">
     <label>Your name</label>
     <select id="who"><option value="">— select your name —</option></select>
+    <input id="pin" type="tel" inputmode="numeric" maxlength="4" placeholder="Your 4-digit PIN"
+      style="display:none;width:100%;padding:13px;margin-top:9px;background:#0c1720;
+      border:1px solid rgba(80,190,180,.3);border-radius:12px;color:#E9F3F1;font-size:17px;
+      letter-spacing:6px;text-align:center;font-weight:700">
     <div id="shifts"></div>
     <div id="action"></div>
     <div id="msg"></div>
@@ -97,6 +101,10 @@ var SITES={ "Aeropod":{lat:5.9500945,lng:116.0602531,radius:30,label:"WEDRINK Ae
             "Lintas":{lat:5.9467764,lng:116.0879396,radius:30,label:"WEDRINK Lintas Plaza"},
             "Beverly":{lat:5.9388445,lng:116.1016763,radius:30,label:"WEDRINK Beverly Hills"} };
 var EARLY_MIN=15, BREAK_MIN=60, GRACE_MIN=5, MAX_ACC=150, TZ_OFF=8*60; /* MYT = UTC+8 */
+var PINS={};
+function sha256(s){ return crypto.subtle.digest('SHA-256', new TextEncoder().encode(s))
+  .then(function(buf){ return Array.from(new Uint8Array(buf))
+    .map(function(x){return ('0'+x.toString(16)).slice(-2);}).join(''); }); }
 
 /* ===== tiny supabase REST ===== */
 function H(extra){ var h={apikey:SB_KEY,Authorization:'Bearer '+SB_KEY,
@@ -132,15 +140,20 @@ var whoSel=document.getElementById('who'), shiftsEl=document.getElementById('shi
 var state={shifts:[],checkins:[],breaks:[]};
 function say(html,cls){ msgEl.className=cls||''; msgEl.innerHTML=html; }
 
+var pinEl=document.getElementById('pin');
+function togglePin(){
+  pinEl.style.display = (whoSel.value && (PINS[whoSel.value]||'')) ? 'block' : 'none';
+}
 function loadNames(){
-  GET('shifts?select=employee&order=employee').then(function(rows){
-    var seen={}, names=[];
-    (rows||[]).forEach(function(r){ if(!seen[r.employee]){seen[r.employee]=1;names.push(r.employee);} });
-    names.sort().forEach(function(n){
+  GET('employees?select=name,pin&order=name').then(function(rows){
+    var names=[];
+    (rows||[]).forEach(function(r){ PINS[r.name]=(r.pin||'').trim(); names.push(r.name); });
+    names.forEach(function(n){
       var o=document.createElement('option'); o.value=n; o.textContent=n; whoSel.appendChild(o);
     });
     var saved=localStorage.getItem('wd_name');
     if(saved && names.indexOf(saved)>=0){ whoSel.value=saved; refresh(); }
+    togglePin();
   });
 }
 
@@ -161,7 +174,8 @@ function refresh(){
 }
 
 function ciFor(sh){ return state.checkins.find(function(c){return c.shift===sh.shift;}); }
-function brFor(sh){ return state.breaks.find(function(b){return b.shift===sh.shift;}); }
+function brList(sh){ return state.breaks.filter(function(b){return b.shift===sh.shift;})
+  .sort(function(a,b){return (a.break_no||1)-(b.break_no||1);}); }
 
 function render(who){
   var today=mytToday(), nmin=mytMin();
@@ -175,8 +189,9 @@ function render(who){
     var ci=ciFor(sh), st;
     if(ci){
       var late=ci.minutes_late||0;
-      st = late>0 ? '<span class="late">✓ checked in '+String(ci.clock_in).slice(11,16)+' · ⏰ '+late+' min late</span>'
-                  : '<span class="ok">✓ checked in '+String(ci.clock_in).slice(11,16)+' · on time</span>';
+      st = late>0 ? '<span class="late">✓ in '+String(ci.clock_in).slice(11,16)+' · ⏰ '+late+' min late</span>'
+                  : '<span class="ok">✓ in '+String(ci.clock_in).slice(11,16)+' · on time</span>';
+      if(ci.clock_out) st += ' <span class="mut">· ⏹ out '+String(ci.clock_out).slice(11,16)+'</span>';
     } else {
       st='<span class="mut">not checked in · opens '+hhmm(toMin(sh.start_time)-EARLY_MIN)+'</span>';
     }
@@ -206,28 +221,48 @@ function render(who){
         hhmm(toMin(soonest.start_time)-EARLY_MIN)+'</b>.','mut');
     return;
   }
-  /* all checked in -> break machine on the latest shift */
+  /* all checked in -> break machine + clock-out on the latest shift */
   var cur=state.shifts[state.shifts.length-1];
-  var br=brFor(cur);
-  if(!br){
-    actionEl.innerHTML='<button class="bigbtn btn-brk" id="bs">☕ Start my break ('+BREAK_MIN+' min)</button>';
-    document.getElementById('bs').onclick=function(){ startBreak(who,cur); };
-  } else if(!br.resume_at){
-    var el=Math.max(0,Math.round((nowUTCms()-new Date(br.break_start).getTime())/60000));
+  var curCi=ciFor(cur);
+  if(curCi && curCi.clock_out){
+    say('🏁 Shift complete — in '+String(curCi.clock_in).slice(11,16)+', out '+
+        String(curCi.clock_out).slice(11,16)+'. See you next shift! 🧋','ok');
+    return;
+  }
+  var brs=brList(cur);
+  var active=null;
+  for(var k=0;k<brs.length;k++){ if(!brs[k].resume_at){ active=brs[k]; break; } }
+  if(active){
+    var el=Math.max(0,Math.round((nowUTCms()-new Date(active.break_start).getTime())/60000));
     var left=BREAK_MIN-el;
-    var dueM=(toMinFromTs(br.break_start)+BREAK_MIN)%1440;
-    say(left>=0 ? '☕ On break for <b>'+el+' min</b> — resume by <b>'+hhmm(dueM)+'</b> ('+left+' min left).'
-                : '☕ On break <b>'+el+' min</b> — <b class="late">'+(-left)+' min over!</b> Head back and tap Resume.',
+    var dueM=(toMinFromTs(active.break_start)+BREAK_MIN)%1440;
+    var bl=(active.break_no||1)===1?'1st':'2nd';
+    say(left>=0 ? '☕ On your '+bl+' break for <b>'+el+' min</b> — resume by <b>'+hhmm(dueM)+'</b> ('+left+' min left).'
+                : '☕ '+bl+' break <b>'+el+' min</b> — <b class="late">'+(-left)+' min over!</b> Head back and tap Resume.',
         left>=0?'blue':'late');
     actionEl.innerHTML='<button class="bigbtn btn-res" id="br">🔙 Resume — I\'m back at the shop</button>';
-    document.getElementById('br').onclick=function(){ doResume(who,cur,br); };
-  } else {
-    var dur=Math.round((new Date(br.resume_at)-new Date(br.break_start))/60000);
-    var over=br.minutes_over||0;
-    say('🧋 All checked in · ☕ break done ('+dur+' min'+
-        (over>GRACE_MIN?' · <span class="late">⏰ '+over+' min over</span>':' · ✅ within time')+
-        '). Have a great shift!','ok');
+    document.getElementById('br').onclick=function(){ doResume(who,cur,active); };
+    return;
   }
+  var doneTxt='';
+  brs.forEach(function(b){
+    var dur=Math.round((new Date(b.resume_at)-new Date(b.break_start))/60000);
+    var over=b.minutes_over||0;
+    doneTxt+='☕ Break '+(b.break_no||1)+': '+dur+' min'+
+      (over>GRACE_MIN?' <span class="late">(+'+over+')</span>':' ✅')+' &nbsp; ';
+  });
+  if(doneTxt) say(doneTxt,'mut');
+  var btns='';
+  if(brs.length<2){
+    btns+='<button class="bigbtn btn-brk" id="bs">☕ Start my '+(brs.length===0?'':'2nd ')+
+          'break ('+BREAK_MIN+' min)</button>';
+  }
+  btns+='<button class="bigbtn" id="co" style="background:linear-gradient(135deg,#e2635b,#c74438);color:#fff;box-shadow:0 8px 22px rgba(226,99,91,.28)">🔴 Clock out — end my shift</button>';
+  actionEl.innerHTML=btns;
+  if(brs.length<2){
+    document.getElementById('bs').onclick=function(){ startBreak(who,cur,brs.length+1); };
+  }
+  document.getElementById('co').onclick=function(){ doClockOut(who,cur,curCi); };
 }
 function toMinFromTs(ts){ var d=new Date(new Date(ts).getTime()+TZ_OFF*60000);
   return d.getUTCHours()*60+d.getUTCMinutes(); }
@@ -249,6 +284,21 @@ function getGPS(cb){
 function doCheckin(who, sh){
   var site=SITES[sh.location];
   if(!site){ say('Branch geofence not configured.','late'); return; }
+  var needPin=(PINS[who]||'');
+  if(needPin){
+    var pv=(pinEl.value||'').trim();
+    if(!pv){ say('Enter your 4-digit PIN first — this confirms it\'s really you.','late'); return; }
+    sha256(pv).then(function(h){
+      sha256(needPin).then(function(h2){
+        if(h!==h2){ say('Wrong PIN — check with your admin if you forgot it.','late'); return; }
+        reallyCheckin(who, sh, site);
+      });
+    });
+    return;
+  }
+  reallyCheckin(who, sh, site);
+}
+function reallyCheckin(who, sh, site){
   getGPS(function(lat,lng,acc){
     if(acc>MAX_ACC){ say('GPS signal too weak (±'+acc+' m). Move near a window and retry.','late'); return; }
     var dist=Math.round(hav(lat,lng,site.lat,site.lng));
@@ -274,9 +324,9 @@ function doCheckin(who, sh){
   });
 }
 
-function startBreak(who, sh){
-  POST('breaks?on_conflict=work_date,employee,shift',
-    [{work_date:mytToday(), employee:who, shift:sh.shift}],
+function startBreak(who, sh, breakNo){
+  POST('breaks?on_conflict=work_date,employee,shift,break_no',
+    [{work_date:mytToday(), employee:who, shift:sh.shift, break_no:(breakNo||1)}],
     {Prefer:'resolution=ignore-duplicates,return=minimal'})
   .then(function(r){
     if(r.status===201||r.status===200||r.status===204){
@@ -297,7 +347,7 @@ function doResume(who, sh, br){
     var over=Math.max(0, Math.round(el-BREAK_MIN));
     say('<span class="pulse">Saving…</span>','mut');
     PATCH('breaks?work_date=eq.'+mytToday()+'&employee=eq.'+encodeURIComponent(who)+
-          '&shift=eq.'+encodeURIComponent(sh.shift),
+          '&shift=eq.'+encodeURIComponent(sh.shift)+'&break_no=eq.'+(br.break_no||1),
       {resume_at:new Date(nowUTCms()).toISOString(), resume_lat:+lat.toFixed(6),
        resume_lng:+lng.toFixed(6), resume_acc:acc, resume_dist:dist, minutes_over:over})
     .then(function(r){
@@ -305,6 +355,35 @@ function doResume(who, sh, br){
         say('✓ Welcome back! Break was <b>'+Math.round(el)+' min</b> · '+
             (over<=GRACE_MIN?'✅ within break time':'⏰ <b>'+over+' min</b> over')+
             ' · '+dist+' m from the shop.','ok');
+        setTimeout(refresh,1200);
+      } else { say('Could not save — tap again. ('+r.status+')','late'); }
+    }).catch(function(){ say('Network problem — tap again.','late'); });
+  });
+}
+
+function doClockOut(who, sh, ci){
+  var site=SITES[sh.location];
+  getGPS(function(lat,lng,acc){
+    if(acc>MAX_ACC){ say('GPS signal too weak (±'+acc+' m). Retry near a window.','late'); return; }
+    var dist=Math.round(hav(lat,lng,site.lat,site.lng));
+    if(dist>site.radius){ say('You are about <b>'+dist+' m</b> from '+site.label+
+      ' (must be within '+site.radius+' m to clock out). Move closer and retry.','late'); return; }
+    var nmin=mytMin();
+    var stamp=mytToday()+' '+hhmm(nmin);
+    say('<span class="pulse">Saving…</span>','mut');
+    PATCH('check_ins?work_date=eq.'+mytToday()+'&employee=eq.'+encodeURIComponent(who)+
+          '&shift=eq.'+encodeURIComponent(sh.shift),
+      {clock_out:stamp, co_lat:+lat.toFixed(6), co_lng:+lng.toFixed(6),
+       co_acc:acc, co_dist:dist})
+    .then(function(r){
+      if(r.status===200||r.status===204){
+        var worked='';
+        try{
+          var inM=toMin(String(ci.clock_in).slice(11,16));
+          var w=(Math.round(nmin)-inM+1440)%1440;
+          worked=' · worked '+Math.floor(w/60)+'h '+(w%60)+'m';
+        }catch(e){}
+        say('✓ Clocked out at <b>'+stamp+'</b>'+worked+'. See you next shift! 🧋','ok');
         setTimeout(refresh,1200);
       } else { say('Could not save — tap again. ('+r.status+')','late'); }
     }).catch(function(){ say('Network problem — tap again.','late'); });
@@ -319,7 +398,7 @@ function tickClock(){
     d.getUTCDate()+' '+['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getUTCMonth()]+
     ' · '+hhmm(d.getUTCHours()*60+d.getUTCMinutes())+' (Sabah time)';
 }
-whoSel.onchange=refresh;
+whoSel.onchange=function(){ togglePin(); refresh(); };
 syncClock().then(function(){ tickClock(); loadNames(); });
 setInterval(tickClock,15000);
 setInterval(function(){ if(whoSel.value) refresh(); },30000);
