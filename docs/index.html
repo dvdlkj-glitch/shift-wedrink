@@ -137,7 +137,7 @@ function hav(a,b,c,d){ var R=6371000,q=Math.PI/180;
 /* ===== state ===== */
 var whoSel=document.getElementById('who'), shiftsEl=document.getElementById('shifts'),
     actionEl=document.getElementById('action'), msgEl=document.getElementById('msg');
-var state={shifts:[],checkins:[],breaks:[]};
+var state={shifts:[],checkins:[],breaks:[],today:null};
 function say(html,cls){ msgEl.className=cls||''; msgEl.innerHTML=html; }
 
 var pinEl=document.getElementById('pin');
@@ -163,6 +163,7 @@ function refresh(){
   if(!who) return;
   localStorage.setItem('wd_name', who);
   var today=mytToday();
+  state.today=today;
   Promise.all([
     GET('shifts?select=*&work_date=eq.'+today+'&employee=eq.'+encodeURIComponent(who)+'&order=start_time'),
     GET('check_ins?select=*&work_date=eq.'+today+'&employee=eq.'+encodeURIComponent(who)),
@@ -307,10 +308,10 @@ function reallyCheckin(who, sh, site){
     var nmin=mytMin(), openM=toMin(sh.start_time)-EARLY_MIN;
     if(nmin<openM){ say('Too early — opens at '+hhmm(openM)+'.','late'); return; }
     var late=Math.max(0, Math.round(nmin-toMin(sh.start_time)));
-    var stamp=mytToday()+' '+hhmm(nmin);
+    var stamp=state.today+' '+hhmm(nmin);
     say('<span class="pulse">Saving your check-in…</span>','mut');
     POST('check_ins?on_conflict=work_date,employee,shift',
-      [{work_date:mytToday(), employee:who, branch:sh.location, shift:sh.shift,
+      [{work_date:state.today, employee:who, branch:sh.location, shift:sh.shift,
         shift_start:sh.start_time, clock_in:stamp, lat:+lat.toFixed(6), lng:+lng.toFixed(6),
         accuracy_m:acc, distance_m:dist, minutes_late:late}],
       {Prefer:'resolution=ignore-duplicates,return=minimal'})
@@ -326,7 +327,7 @@ function reallyCheckin(who, sh, site){
 
 function startBreak(who, sh, breakNo){
   POST('breaks?on_conflict=work_date,employee,shift,break_no',
-    [{work_date:mytToday(), employee:who, shift:sh.shift, break_no:(breakNo||1)}],
+    [{work_date:state.today, employee:who, shift:sh.shift, break_no:(breakNo||1)}],
     {Prefer:'resolution=ignore-duplicates,return=minimal'})
   .then(function(r){
     if(r.status===201||r.status===200||r.status===204){
@@ -346,7 +347,7 @@ function doResume(who, sh, br){
     var el=(nowUTCms()-new Date(br.break_start).getTime())/60000;
     var over=Math.max(0, Math.round(el-BREAK_MIN));
     say('<span class="pulse">Saving…</span>','mut');
-    PATCH('breaks?work_date=eq.'+mytToday()+'&employee=eq.'+encodeURIComponent(who)+
+    PATCH('breaks?work_date=eq.'+state.today+'&employee=eq.'+encodeURIComponent(who)+
           '&shift=eq.'+encodeURIComponent(sh.shift)+'&break_no=eq.'+(br.break_no||1),
       {resume_at:new Date(nowUTCms()).toISOString(), resume_lat:+lat.toFixed(6),
        resume_lng:+lng.toFixed(6), resume_acc:acc, resume_dist:dist, minutes_over:over})
@@ -369,9 +370,9 @@ function doClockOut(who, sh, ci){
     if(dist>site.radius){ say('You are about <b>'+dist+' m</b> from '+site.label+
       ' (must be within '+site.radius+' m to clock out). Move closer and retry.','late'); return; }
     var nmin=mytMin();
-    var stamp=mytToday()+' '+hhmm(nmin);
+    var stamp=state.today+' '+hhmm(nmin);   /* midnight-safe: the SHIFT's day */
     say('<span class="pulse">Saving…</span>','mut');
-    PATCH('check_ins?work_date=eq.'+mytToday()+'&employee=eq.'+encodeURIComponent(who)+
+    PATCH('check_ins?work_date=eq.'+state.today+'&employee=eq.'+encodeURIComponent(who)+
           '&shift=eq.'+encodeURIComponent(sh.shift),
       {clock_out:stamp, co_lat:+lat.toFixed(6), co_lng:+lng.toFixed(6),
        co_acc:acc, co_dist:dist})
@@ -399,6 +400,10 @@ function tickClock(){
     ' · '+hhmm(d.getUTCHours()*60+d.getUTCMinutes())+' (Sabah time)';
 }
 whoSel.onchange=function(){ togglePin(); refresh(); };
+function wake(){ syncClock().then(function(){ tickClock(); if(whoSel.value) refresh(); }); }
+document.addEventListener('visibilitychange', function(){ if(!document.hidden) wake(); });
+window.addEventListener('pageshow', function(e){ if(e.persisted) wake(); });
+window.addEventListener('focus', wake);
 syncClock().then(function(){ tickClock(); loadNames(); });
 setInterval(tickClock,15000);
 setInterval(function(){ if(whoSel.value) refresh(); },30000);
