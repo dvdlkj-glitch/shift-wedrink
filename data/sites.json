@@ -1,5 +1,5 @@
 {
-  "Aeropod": {"lat": 5.9500945, "lng": 116.0602531, "radius_m": 30, "configured": true},
-  "Lintas":  {"lat": 5.9467764, "lng": 116.0879396, "radius_m": 30, "configured": true},
-  "Beverly": {"lat": 5.9388445, "lng": 116.1016763, "radius_m": 30, "configured": true}
+  "Aeropod": {"lat": 5.950203, "lng": 116.060190, "radius_m": 100, "configured": true},
+  "Lintas":  {"lat": 5.946709, "lng": 116.087965, "radius_m": 100, "configured": true},
+  "Beverly": {"lat": 5.938874, "lng": 116.101648, "radius_m": 100, "configured": true}
 }

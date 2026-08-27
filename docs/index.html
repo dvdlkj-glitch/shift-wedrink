@@ -97,9 +97,21 @@
 /* ===== config (mirror of the dashboard's rules) ===== */
 var SB_URL="https://njrokrqqvmoevvfhjbju.supabase.co";
 var SB_KEY="sb_publishable_n3HBjj9fPb9HbyOdmTiBHw_lYCTw_PI";
-var SITES={ "Aeropod":{lat:5.9500945,lng:116.0602531,radius:30,label:"WEDRINK Aeropod"},
-            "Lintas":{lat:5.9467764,lng:116.0879396,radius:30,label:"WEDRINK Lintas Plaza"},
-            "Beverly":{lat:5.9388445,lng:116.1016763,radius:30,label:"WEDRINK Beverly Hills"} };
+/* fallback only — real geofences load from Supabase `sites` at startup */
+var SITES={ "Aeropod":{lat:5.950203,lng:116.060190,radius:100,label:"WEDRINK Aeropod"},
+            "Lintas":{lat:5.946709,lng:116.087965,radius:100,label:"WEDRINK Lintas Plaza"},
+            "Beverly":{lat:5.938874,lng:116.101648,radius:100,label:"WEDRINK Beverly Hills"} };
+function loadSites(){
+  return GET('sites?select=*').then(function(rows){
+    if(!Array.isArray(rows)) return;
+    rows.forEach(function(r){
+      if(!SITES[r.branch]) SITES[r.branch]={label:r.branch};
+      SITES[r.branch].lat=r.lat; SITES[r.branch].lng=r.lng;
+      SITES[r.branch].radius=r.radius_m;
+      SITES[r.branch].configured=r.configured;
+    });
+  }).catch(function(){});
+}
 var EARLY_MIN=15, BREAK_MIN=60, GRACE_MIN=5, MAX_ACC=150, TZ_OFF=8*60; /* MYT = UTC+8 */
 var PINS={};
 function sha256(s){ return crypto.subtle.digest('SHA-256', new TextEncoder().encode(s))
@@ -133,6 +145,16 @@ function toMin(s){ var p=String(s||'').split(':'); return (+p[0])*60+(+p[1]||0);
 function hav(a,b,c,d){ var R=6371000,q=Math.PI/180;
   var x=Math.sin((c-a)*q/2), y=Math.sin((d-b)*q/2);
   var h=x*x+Math.cos(a*q)*Math.cos(c*q)*y*y; return 2*R*Math.asin(Math.sqrt(h)); }
+
+function logFail(reason, who, sh, dist, acc, la, ln){
+  try{
+    POST('checkin_failures', [{work_date:(state.today||mytToday()), employee:who||'',
+      branch:(sh&&sh.location)||null, action:'checkin', reason:reason,
+      distance_m:(dist==null?null:dist), accuracy_m:(acc==null?null:acc),
+      lat:(la==null?null:la), lng:(ln==null?null:ln),
+      device:navigator.userAgent.slice(0,120)}], {Prefer:'return=minimal'});
+  }catch(e){}
+}
 
 /* ===== state ===== */
 var whoSel=document.getElementById('who'), shiftsEl=document.getElementById('shifts'),
@@ -269,15 +291,19 @@ function toMinFromTs(ts){ var d=new Date(new Date(ts).getTime()+TZ_OFF*60000);
   return d.getUTCHours()*60+d.getUTCMinutes(); }
 
 /* ===== actions ===== */
-function getGPS(cb){
-  if(!navigator.geolocation){ say('This device does not support GPS.','late'); return; }
+function getGPS(cb, failCtx){
+  if(!navigator.geolocation){ say('This device does not support GPS.','late');
+    logFail('no_geolocation', failCtx&&failCtx.who, failCtx&&failCtx.sh); return; }
   say('<span class="pulse">Getting your location…</span>','mut');
   navigator.geolocation.getCurrentPosition(function(pos){
     cb(pos.coords.latitude, pos.coords.longitude, Math.round(pos.coords.accuracy));
   }, function(err){
-    var t={1:'Location permission denied — allow location for this app and retry.',
-           2:'Position unavailable — move outdoors / near a window.',
-           3:'Timed out — please try again.'};
+    var t={1:'Location permission denied — please allow location for this app, then tap again. '+
+             '(iPhone: Settings ▸ Privacy ▸ Location Services ▸ Safari/WeDrink ▸ While Using)',
+           2:'Position unavailable — step near a window or outside and tap again.',
+           3:'Timed out — please tap again.'};
+    logFail(({1:'permission_denied',2:'position_unavailable',3:'gps_timeout'})[err.code]||'gps_error',
+            failCtx&&failCtx.who, failCtx&&failCtx.sh);
     say(t[err.code]||('Location error: '+err.message),'late');
   }, {enableHighAccuracy:true, timeout:12000, maximumAge:0});
 }
@@ -301,12 +327,15 @@ function doCheckin(who, sh){
 }
 function reallyCheckin(who, sh, site){
   getGPS(function(lat,lng,acc){
-    if(acc>MAX_ACC){ say('GPS signal too weak (±'+acc+' m). Move near a window and retry.','late'); return; }
+    if(acc>MAX_ACC){ logFail('weak_gps',who,sh,null,acc,lat,lng);
+      say('GPS signal too weak (±'+acc+' m). Move near a window and retry.','late'); return; }
     var dist=Math.round(hav(lat,lng,site.lat,site.lng));
-    if(dist>site.radius){ say('You are about <b>'+dist+' m</b> from '+site.label+
+    if(dist>site.radius){ logFail('too_far',who,sh,dist,acc,lat,lng);
+      say('You are about <b>'+dist+' m</b> from '+site.label+
       ' (must be within '+site.radius+' m). Move closer and retry.','late'); return; }
     var nmin=mytMin(), openM=toMin(sh.start_time)-EARLY_MIN;
-    if(nmin<openM){ say('Too early — opens at '+hhmm(openM)+'.','late'); return; }
+    if(nmin<openM){ logFail('too_early',who,sh,dist,acc,lat,lng);
+      say('Too early — opens at '+hhmm(openM)+'.','late'); return; }
     var late=Math.max(0, Math.round(nmin-toMin(sh.start_time)));
     var stamp=state.today+' '+hhmm(nmin);
     say('<span class="pulse">Saving your check-in…</span>','mut');
@@ -321,8 +350,9 @@ function reallyCheckin(who, sh, site){
             (late>0?'⏰ '+late+' min late':'✅ on time')+' · '+dist+' m from the shop.','ok');
         setTimeout(refresh,1200);
       } else { say('Could not save — please tap again. ('+r.status+')','late'); }
-    }).catch(function(){ say('Network problem — check connection and tap again.','late'); });
-  });
+    }).catch(function(){ logFail('network_error',who,sh,dist,acc,lat,lng);
+      say('Network problem — check connection and tap again.','late'); });
+  }, {who:who, sh:sh});
 }
 
 function startBreak(who, sh, breakNo){
@@ -404,7 +434,7 @@ function wake(){ syncClock().then(function(){ tickClock(); if(whoSel.value) refr
 document.addEventListener('visibilitychange', function(){ if(!document.hidden) wake(); });
 window.addEventListener('pageshow', function(e){ if(e.persisted) wake(); });
 window.addEventListener('focus', wake);
-syncClock().then(function(){ tickClock(); loadNames(); });
+syncClock().then(function(){ tickClock(); loadSites().then(loadNames); });
 setInterval(tickClock,15000);
 setInterval(function(){ if(whoSel.value) refresh(); },30000);
 

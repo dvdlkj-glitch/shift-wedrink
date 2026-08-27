@@ -73,7 +73,7 @@ st.set_page_config(page_title="WeDrink Sabah — Shift Dashboard",
                    page_icon="🧋", layout="wide")
 
 # Build marker — bump when debugging deploys to confirm which code Cloud runs.
-APP_BUILD = "b23-2026-08-01"
+APP_BUILD = "b24-2026-08-27"
 
 DEFAULT_ADMIN_USER = "admin"
 DEFAULT_ADMIN_PW = "wedrink2026"
@@ -225,30 +225,45 @@ def actual_hours(ci, co):
 
 # ===================== GPS CHECK-IN =====================
 def load_sites():
-    """Branch geofences {loc: {lat,lng,radius_m,configured}}. Auto-seeds any
-    location missing from sites.json so new branches never break check-in."""
+    """Branch geofences {loc: {lat,lng,radius_m,configured}}.
+    Supabase `sites` is the single source of truth so the dashboard and the
+    phone app can never drift apart; falls back to sites.json locally."""
     d = {}
-    if os.path.exists(SITES_JSON):
+    if db_enabled():
+        code, text = _sb_request("sites?select=*", "GET")
+        if code == 200:
+            try:
+                for r in json.loads(text):
+                    d[r["branch"]] = {"lat": float(r["lat"]), "lng": float(r["lng"]),
+                                      "radius_m": int(r["radius_m"]),
+                                      "configured": bool(r["configured"])}
+            except Exception:
+                d = {}
+    if not d and os.path.exists(SITES_JSON):
         try:
             d = json.load(open(SITES_JSON))
         except Exception:
             d = {}
-    changed = False
     for loc in config["locations"]:
         if loc not in d:
             d[loc] = dict(DEFAULT_SITES.get(
-                loc, {"lat": 5.98, "lng": 116.07, "radius_m": 20, "configured": False}))
-            changed = True
-    if changed:
-        try:
-            save_sites(d)
-        except Exception:
-            pass
+                loc, {"lat": 5.98, "lng": 116.07, "radius_m": 100, "configured": False}))
     return d
 
 
 def save_sites(d):
-    json.dump(d, open(SITES_JSON, "w"), indent=2)
+    """Persist geofences to Supabase (both apps read it), else the JSON file."""
+    if db_enabled():
+        recs = [{"branch": k, "lat": float(v["lat"]), "lng": float(v["lng"]),
+                 "radius_m": int(v.get("radius_m", 100)),
+                 "configured": bool(v.get("configured", True))}
+                for k, v in d.items()]
+        _sb_request("sites?on_conflict=branch", "POST", body=recs,
+                    extra_headers={"Prefer": "resolution=merge-duplicates,return=minimal"})
+    try:
+        json.dump(d, open(SITES_JSON, "w"), indent=2)
+    except Exception:
+        pass
 
 
 def haversine_m(lat1, lng1, lat2, lng2):
@@ -395,6 +410,17 @@ def geo_checkin_html(r, site, win_min, now_min, pin=""):
     b.disabled=false; b.style.opacity=1; }
   function hdrs(){ return {apikey:C.sb.key, Authorization:'Bearer '+C.sb.key,
                           'Content-Type':'application/json'}; }
+  function logFail(reason, dist, acc, la, ln){
+    try{
+      fetch(C.sb.url+'/rest/v1/checkin_failures',{method:'POST',
+        headers:Object.assign(hdrs(),{Prefer:'return=minimal'}),
+        body:JSON.stringify([{work_date:C.date, employee:C.emp, branch:C.branch,
+          action:'checkin', reason:reason,
+          distance_m:(dist==null?null:dist), accuracy_m:(acc==null?null:acc),
+          lat:(la==null?null:la), lng:(ln==null?null:ln),
+          device:navigator.userAgent.slice(0,120)}])});
+    }catch(e){}
+  }
   var qs='work_date=eq.'+C.date+'&employee=eq.'+encodeURIComponent(C.emp)+
          '&shift=eq.'+encodeURIComponent(C.shift);
   b.onclick=function(){
@@ -418,12 +444,15 @@ def geo_checkin_html(r, site, win_min, now_min, pin=""):
     navigator.geolocation.getCurrentPosition(function(pos){
       var lat=pos.coords.latitude, lng=pos.coords.longitude,
           acc=Math.round(pos.coords.accuracy);
-      if(acc>C.maxAcc){ bad('GPS signal too weak (±'+acc+' m). Move outdoors or near a window and try again.'); return; }
+      if(acc>C.maxAcc){ logFail('weak_gps', null, acc, lat, lng);
+        bad('GPS signal too weak (±'+acc+' m). Move outdoors or near a window and try again.'); return; }
       var dist=Math.round(hav(lat,lng,C.site.lat,C.site.lng));
-      if(dist>C.site.radius){ bad('You are about '+dist+' m from '+C.branchLabel+
+      if(dist>C.site.radius){ logFail('too_far', dist, acc, lat, lng);
+        bad('You are about '+dist+' m from '+C.branchLabel+
         ' (must be within '+Math.round(C.site.radius)+' m). Move closer and retry.'); return; }
       var nm=nowMin();
-      if(nm<C.openMin){ bad('Too early — check-in for your '+C.shift+' shift ('+C.start+
+      if(nm<C.openMin){ logFail('too_early', dist, acc, lat, lng);
+        bad('Too early — check-in for your '+C.shift+' shift ('+C.start+
         ') opens at '+hhmm(C.openMin)+'. Come back then.'); return; }
       var late=Math.max(0,Math.round(nm-C.startMin));
       var stamp=C.date+' '+hhmm(nm);
@@ -459,6 +488,8 @@ def geo_checkin_html(r, site, win_min, now_min, pin=""):
       var t={1:'Location permission denied — allow location for this site and retry.',
              2:'Position unavailable — move outdoors / near a window.',
              3:'Timed out — please try again.'};
+      logFail(({1:'permission_denied',2:'position_unavailable',3:'gps_timeout'})[err.code]
+              || 'gps_error', null, null, null, null);
       bad(t[err.code]||('Location error: '+err.message));
     }, {enableHighAccuracy:true, timeout:12000, maximumAge:0});
   }
@@ -2673,6 +2704,45 @@ def render_admin():
                 })
             st.dataframe(pd.DataFrame(rows_tbl), width="stretch", hide_index=True)
             st.caption("Src: gps = recorded by the staff's phone · manual = keyed in by admin.")
+
+            # ---- why did anyone fail to check in? (rejections never reach the DB otherwise)
+            if db_enabled():
+                q = urlencode({"select": "*", "work_date": f"eq.{rec_day}",
+                               "order": "created_at.desc", "limit": "60"})
+                fcode, ftext = _sb_request(f"checkin_failures?{q}", "GET")
+                fails = []
+                if fcode == 200:
+                    try:
+                        fails = json.loads(ftext)
+                    except Exception:
+                        fails = []
+                REASON = {"too_far": "📍 Too far from the shop",
+                          "weak_gps": "📶 GPS signal too weak",
+                          "permission_denied": "🚫 Location permission denied",
+                          "position_unavailable": "🛰️ Position unavailable",
+                          "gps_timeout": "⏱️ GPS timed out",
+                          "no_geolocation": "❌ Device has no GPS",
+                          "too_early": "⏳ Before the check-in window",
+                          "network_error": "📴 Network problem"}
+                with st.expander(f"⚠️ Failed check-in attempts — {len(fails)} on this day",
+                                 expanded=bool(fails)):
+                    if not fails:
+                        st.caption("No failed attempts recorded. (Staff who simply never opened "
+                                   "the app leave no trace here.)")
+                    else:
+                        st.dataframe(pd.DataFrame([{
+                            "Time": str(f.get("created_at", ""))[11:16],
+                            "Staff": f.get("employee", ""),
+                            "Branch": loc_label(f.get("branch") or ""),
+                            "Why": REASON.get(f.get("reason"), f.get("reason", "")),
+                            "Distance": (f"{round(f['distance_m'])} m"
+                                         if f.get("distance_m") is not None else "—"),
+                            "GPS acc": (f"±{round(f['accuracy_m'])} m"
+                                        if f.get("accuracy_m") is not None else "—"),
+                        } for f in fails]), width="stretch", hide_index=True)
+                        st.caption("Use this to tell a real problem (permission denied / weak GPS) "
+                                   "from someone genuinely not at the shop — then fix it with "
+                                   "the manual key-in below.")
 
             with st.expander("✏️ Edit / key in a record (for GPS or distance problems)"):
                 opts = [f"{r['employee']} · {r['shift']} ({r['location']})"
