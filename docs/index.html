@@ -146,6 +146,9 @@ function hav(a,b,c,d){ var R=6371000,q=Math.PI/180;
   var x=Math.sin((c-a)*q/2), y=Math.sin((d-b)*q/2);
   var h=x*x+Math.cos(a*q)*Math.cos(c*q)*y*y; return 2*R*Math.asin(Math.sqrt(h)); }
 
+function preciseHint(acc){
+  return '<br><b>Your phone is only giving an approximate location (±'+acc+' m), not real GPS.</b><br>📱 <b>iPhone:</b> Settings ▸ Privacy &amp; Security ▸ Location Services ▸ <i>Safari Websites</i> (or WeDrink) ▸ turn ON <b>Precise Location</b>, then tap again.<br>📱 <b>Android:</b> Settings ▸ Location ▸ turn on <b>Google Location Accuracy</b>.';
+}
 function logFail(reason, who, sh, dist, acc, la, ln){
   try{
     POST('checkin_failures', [{work_date:(state.today||mytToday()), employee:who||'',
@@ -159,7 +162,7 @@ function logFail(reason, who, sh, dist, acc, la, ln){
 /* ===== state ===== */
 var whoSel=document.getElementById('who'), shiftsEl=document.getElementById('shifts'),
     actionEl=document.getElementById('action'), msgEl=document.getElementById('msg');
-var state={shifts:[],checkins:[],breaks:[],today:null};
+var state={shifts:[],checkins:[],breaks:[],today:null,yday:null};
 function say(html,cls){ msgEl.className=cls||''; msgEl.innerHTML=html; }
 
 var pinEl=document.getElementById('pin');
@@ -179,29 +182,69 @@ function loadNames(){
   });
 }
 
+function ydayOf(iso){
+  var d=new Date(iso+'T00:00:00Z'); d.setUTCDate(d.getUTCDate()-1);
+  return d.toISOString().slice(0,10);
+}
 function refresh(){
   var who=whoSel.value;
   shiftsEl.innerHTML=''; actionEl.innerHTML=''; say('');
   if(!who) return;
   localStorage.setItem('wd_name', who);
   var today=mytToday();
-  state.today=today;
+  state.today=today; state.yday=ydayOf(today);
+  /* Load YESTERDAY too: a night shift ending 00:00 must stay clock-out-able
+     after midnight, once "today" has already rolled over. */
+  var days='in.('+state.yday+','+today+')', emp=encodeURIComponent(who);
   Promise.all([
-    GET('shifts?select=*&work_date=eq.'+today+'&employee=eq.'+encodeURIComponent(who)+'&order=start_time'),
-    GET('check_ins?select=*&work_date=eq.'+today+'&employee=eq.'+encodeURIComponent(who)),
-    GET('breaks?select=*&work_date=eq.'+today+'&employee=eq.'+encodeURIComponent(who))
+    GET('shifts?select=*&work_date='+days+'&employee=eq.'+emp+'&order=work_date,start_time'),
+    GET('check_ins?select=*&work_date='+days+'&employee=eq.'+emp),
+    GET('breaks?select=*&work_date='+days+'&employee=eq.'+emp)
   ]).then(function(res){
     state.shifts=res[0]||[]; state.checkins=res[1]||[]; state.breaks=res[2]||[];
     render(who);
   }).catch(function(){ say('Network problem — pull down to refresh.','late'); });
 }
 
-function ciFor(sh){ return state.checkins.find(function(c){return c.shift===sh.shift;}); }
-function brList(sh){ return state.breaks.filter(function(b){return b.shift===sh.shift;})
+function ciFor(sh){ return state.checkins.find(function(c){
+  return c.shift===sh.shift && c.work_date===sh.work_date; }); }
+/* when a shift ends, in ms - overnight shifts end on the NEXT day */
+function shiftEndMs(sh){
+  var s=toMin(sh.start_time), e=toMin(sh.end_time);
+  var base=new Date(sh.work_date+'T00:00:00Z').getTime() - TZ_OFF*60000;
+  return base + (e<=s ? e+1440 : e)*60000;
+}
+function brList(sh){ return state.breaks.filter(function(b){
+    return b.shift===sh.shift && b.work_date===sh.work_date; })
   .sort(function(a,b){return (a.break_no||1)-(b.break_no||1);}); }
 
 function render(who){
-  var today=mytToday(), nmin=mytMin();
+  var today=state.today||mytToday(), nmin=mytMin();
+
+  /* Carried-over shift: checked in, not clocked out, from an earlier day.
+     Stays actionable for 8 h after it ended, so a 00:00 finish can still be
+     clocked out once the date has rolled over. */
+  var carry=null;
+  state.shifts.forEach(function(sh){
+    if(sh.work_date===today) return;
+    var ci=ciFor(sh);
+    if(!ci || ci.clock_out) return;
+    if(nowUTCms() > shiftEndMs(sh)+8*3600000) return;
+    if(!carry || shiftEndMs(sh)>shiftEndMs(carry)) carry=sh;
+  });
+  if(carry){
+    var cci=ciFor(carry);
+    shiftsEl.innerHTML='<div class="shift" style="border-left-color:#F2A03D">'+
+      '<b>'+(SITES[carry.location]?SITES[carry.location].label:carry.location)+'</b> · '+
+      carry.shift+' · '+carry.start_time+'–'+carry.end_time+
+      '<div class="st"><span class="late">⏳ still open from '+carry.work_date.slice(5)+
+      '</span> · <span class="ok">✓ in '+String(cci.clock_in).slice(11,16)+
+      '</span></div></div>';
+    sessionUI(who, carry, cci, true);
+    return;
+  }
+
+  state.shifts=state.shifts.filter(function(sh){ return sh.work_date===today; });
   if(!state.shifts.length){
     shiftsEl.innerHTML='<div class="shift" style="border-left-color:#5F776F">'+
       '<b>No shift today</b><div class="st mut">Enjoy your rest day 🌴 — if that\'s wrong, ask your admin.</div></div>';
@@ -245,8 +288,11 @@ function render(who){
     return;
   }
   /* all checked in -> break machine + clock-out on the latest shift */
-  var cur=state.shifts[state.shifts.length-1];
-  var curCi=ciFor(cur);
+  sessionUI(who, state.shifts[state.shifts.length-1],
+            ciFor(state.shifts[state.shifts.length-1]), false);
+}
+
+function sessionUI(who, cur, curCi, carried){
   if(curCi && curCi.clock_out){
     say('🏁 Shift complete — in '+String(curCi.clock_in).slice(11,16)+', out '+
         String(curCi.clock_out).slice(11,16)+'. See you next shift! 🧋','ok');
@@ -328,19 +374,21 @@ function doCheckin(who, sh){
 function reallyCheckin(who, sh, site){
   getGPS(function(lat,lng,acc){
     if(acc>MAX_ACC){ logFail('weak_gps',who,sh,null,acc,lat,lng);
-      say('GPS signal too weak (±'+acc+' m). Move near a window and retry.','late'); return; }
+      say(preciseHint(acc),'late'); return; }
     var dist=Math.round(hav(lat,lng,site.lat,site.lng));
     if(dist>site.radius){ logFail('too_far',who,sh,dist,acc,lat,lng);
       say('You are about <b>'+dist+' m</b> from '+site.label+
-      ' (must be within '+site.radius+' m). Move closer and retry.','late'); return; }
+      ' (must be within '+site.radius+' m).'+
+      (acc>60 ? preciseHint(acc) : ' Move closer and retry.'),'late'); return; }
     var nmin=mytMin(), openM=toMin(sh.start_time)-EARLY_MIN;
     if(nmin<openM){ logFail('too_early',who,sh,dist,acc,lat,lng);
       say('Too early — opens at '+hhmm(openM)+'.','late'); return; }
     var late=Math.max(0, Math.round(nmin-toMin(sh.start_time)));
-    var stamp=state.today+' '+hhmm(nmin);
+    var wd=sh.work_date||state.today;
+    var stamp=wd+' '+hhmm(nmin);
     say('<span class="pulse">Saving your check-in…</span>','mut');
     POST('check_ins?on_conflict=work_date,employee,shift',
-      [{work_date:state.today, employee:who, branch:sh.location, shift:sh.shift,
+      [{work_date:wd, employee:who, branch:sh.location, shift:sh.shift,
         shift_start:sh.start_time, clock_in:stamp, lat:+lat.toFixed(6), lng:+lng.toFixed(6),
         accuracy_m:acc, distance_m:dist, minutes_late:late}],
       {Prefer:'resolution=ignore-duplicates,return=minimal'})
@@ -357,7 +405,7 @@ function reallyCheckin(who, sh, site){
 
 function startBreak(who, sh, breakNo){
   POST('breaks?on_conflict=work_date,employee,shift,break_no',
-    [{work_date:state.today, employee:who, shift:sh.shift, break_no:(breakNo||1)}],
+    [{work_date:(sh.work_date||state.today), employee:who, shift:sh.shift, break_no:(breakNo||1)}],
     {Prefer:'resolution=ignore-duplicates,return=minimal'})
   .then(function(r){
     if(r.status===201||r.status===200||r.status===204){
@@ -377,7 +425,7 @@ function doResume(who, sh, br){
     var el=(nowUTCms()-new Date(br.break_start).getTime())/60000;
     var over=Math.max(0, Math.round(el-BREAK_MIN));
     say('<span class="pulse">Saving…</span>','mut');
-    PATCH('breaks?work_date=eq.'+state.today+'&employee=eq.'+encodeURIComponent(who)+
+    PATCH('breaks?work_date=eq.'+(br.work_date||sh.work_date||state.today)+'&employee=eq.'+encodeURIComponent(who)+
           '&shift=eq.'+encodeURIComponent(sh.shift)+'&break_no=eq.'+(br.break_no||1),
       {resume_at:new Date(nowUTCms()).toISOString(), resume_lat:+lat.toFixed(6),
        resume_lng:+lng.toFixed(6), resume_acc:acc, resume_dist:dist, minutes_over:over})
@@ -399,10 +447,11 @@ function doClockOut(who, sh, ci){
     var dist=Math.round(hav(lat,lng,site.lat,site.lng));
     if(dist>site.radius){ say('You are about <b>'+dist+' m</b> from '+site.label+
       ' (must be within '+site.radius+' m to clock out). Move closer and retry.','late'); return; }
-    var nmin=mytMin();
-    var stamp=state.today+' '+hhmm(nmin);   /* midnight-safe: the SHIFT's day */
+    var nmin=mytMin(), wd=sh.work_date||state.today;
+    /* stamp on the SHIFT's own day: a 00:05 finish belongs to that shift */
+    var stamp=wd+' '+hhmm(nmin);
     say('<span class="pulse">Saving…</span>','mut');
-    PATCH('check_ins?work_date=eq.'+state.today+'&employee=eq.'+encodeURIComponent(who)+
+    PATCH('check_ins?work_date=eq.'+wd+'&employee=eq.'+encodeURIComponent(who)+
           '&shift=eq.'+encodeURIComponent(sh.shift),
       {clock_out:stamp, co_lat:+lat.toFixed(6), co_lng:+lng.toFixed(6),
        co_acc:acc, co_dist:dist})

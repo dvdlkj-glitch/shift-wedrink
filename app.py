@@ -73,7 +73,7 @@ st.set_page_config(page_title="WeDrink Sabah — Shift Dashboard",
                    page_icon="🧋", layout="wide")
 
 # Build marker — bump when debugging deploys to confirm which code Cloud runs.
-APP_BUILD = "b24-2026-08-27"
+APP_BUILD = "b25-2026-08-29"
 
 DEFAULT_ADMIN_USER = "admin"
 DEFAULT_ADMIN_PW = "wedrink2026"
@@ -410,6 +410,9 @@ def geo_checkin_html(r, site, win_min, now_min, pin=""):
     b.disabled=false; b.style.opacity=1; }
   function hdrs(){ return {apikey:C.sb.key, Authorization:'Bearer '+C.sb.key,
                           'Content-Type':'application/json'}; }
+  function preciseHint(acc){
+    return '<br><b>Your phone is only giving an approximate location (±'+acc+' m), not real GPS.</b><br>📱 <b>iPhone:</b> Settings ▸ Privacy &amp; Security ▸ Location Services ▸ <i>Safari Websites</i> (or WeDrink) ▸ turn ON <b>Precise Location</b>, then tap again.<br>📱 <b>Android:</b> Settings ▸ Location ▸ turn on <b>Google Location Accuracy</b>.';
+  }
   function logFail(reason, dist, acc, la, ln){
     try{
       fetch(C.sb.url+'/rest/v1/checkin_failures',{method:'POST',
@@ -445,11 +448,12 @@ def geo_checkin_html(r, site, win_min, now_min, pin=""):
       var lat=pos.coords.latitude, lng=pos.coords.longitude,
           acc=Math.round(pos.coords.accuracy);
       if(acc>C.maxAcc){ logFail('weak_gps', null, acc, lat, lng);
-        bad('GPS signal too weak (±'+acc+' m). Move outdoors or near a window and try again.'); return; }
+        bad(preciseHint(acc)); return; }
       var dist=Math.round(hav(lat,lng,C.site.lat,C.site.lng));
       if(dist>C.site.radius){ logFail('too_far', dist, acc, lat, lng);
         bad('You are about '+dist+' m from '+C.branchLabel+
-        ' (must be within '+Math.round(C.site.radius)+' m). Move closer and retry.'); return; }
+        ' (must be within '+Math.round(C.site.radius)+' m).'+
+        (acc>60 ? preciseHint(acc) : ' Move closer and retry.')); return; }
       var nm=nowMin();
       if(nm<C.openMin){ logFail('too_early', dist, acc, lat, lng);
         bad('Too early — check-in for your '+C.shift+' shift ('+C.start+
@@ -1124,6 +1128,32 @@ def do_checkin(emp, lat, lng, acc):
         return {"ok": False, "msg": f"No shift scheduled for {emp} today ({today}). "
                                     "Nothing to check in to — please check with your admin."}
     todays = overlay_checkins(todays)  # reflect durable (Supabase) check-ins
+
+    # ---- unfinished shift carried over past midnight (e.g. a 15:00-00:00 night
+    # shift finishing at 00:05, when "today" has already rolled over) ----
+    yday = (today - timedelta(days=1)).isoformat()
+    ydf = df[(df.employee == who) & (df.date == yday)]
+    if not ydf.empty:
+        ydf = overlay_checkins(ydf)
+        for _, yr in ydf.sort_values("start").iterrows():
+            if not str(yr.get("clock_in", "")).strip():
+                continue
+            if str(yr.get("clock_out", "")).strip():
+                continue
+            e_min = _min_of_day(yr["end"]) or 0
+            s_min = _min_of_day(yr["start"]) or 0
+            end_dt = (pd.Timestamp(yday) + pd.Timedelta(minutes=e_min +
+                      (1440 if e_min <= s_min else 0)))
+            if now.replace(tzinfo=None) > end_dt + pd.Timedelta(hours=8):
+                continue          # too stale - admin keys it in instead
+            st.warning(f"\u23f3 Your **{yr['shift']} shift from {yday}** "
+                       f"({yr['start']}\u2013{yr['end']}) is still open \u2014 "
+                       f"checked in {str(yr['clock_in'])[11:16]}, not clocked out yet.")
+            ysite = load_sites().get(yr["location"], {})
+            if ysite.get("configured"):
+                components.html(clockout_html(yr, ysite), height=150)
+            st.markdown("---")
+            break
     target, status, open_m = pick_checkin_target(todays, now_min, early_min())
     if status == "done":
         first = todays.iloc[0]
