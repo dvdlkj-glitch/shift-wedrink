@@ -73,7 +73,7 @@ st.set_page_config(page_title="WeDrink Sabah — Shift Dashboard",
                    page_icon="🧋", layout="wide")
 
 # Build marker — bump when debugging deploys to confirm which code Cloud runs.
-APP_BUILD = "b25-2026-08-29"
+APP_BUILD = "b26-2026-09-01"
 
 DEFAULT_ADMIN_USER = "admin"
 DEFAULT_ADMIN_PW = "wedrink2026"
@@ -132,26 +132,62 @@ def load_employees():
     return df.fillna("")
 
 
+def _clean_cell(v, default=""):
+    """pandas gives NaN/None for blank grid cells - never let them become 'nan'."""
+    s = str(v).strip() if v is not None else ""
+    return default if s.lower() in ("", "nan", "none", "null", "<na>") else s
+
+
 def save_employees(df):
-    """Replace the roster in Supabase (durable), else write the CSV."""
+    """Save the roster to Supabase (durable), else the CSV.
+
+    NEVER delete-then-insert: a single bad row (e.g. a duplicate name) used to
+    make the insert fail AFTER the wipe, leaving an EMPTY roster - which hides
+    every name from the check-in screen and blocks the whole team. This upserts
+    each row and only removes names the admin actually deleted.
+    """
+    recs, seen = [], {}
+    for _, r in df.iterrows():
+        nm = _clean_cell(r.get("name"))
+        if not nm:
+            continue                              # blank grid rows are ignored
+        key = nm.lower()
+        if key in seen:
+            return False, (f"Duplicate name '{nm}' - each staff name must be unique. "
+                           "Nothing was changed.")
+        seen[key] = True
+        pin = _clean_cell(r.get("pin"))
+        if pin and not pin.isdigit():
+            return False, f"PIN for {nm} must be digits only. Nothing was changed."
+        recs.append({
+            "name": nm,
+            "emp_type": _clean_cell(r.get("type"), "full"),
+            "locations": _clean_cell(r.get("locations"), "Aeropod;Lintas;Beverly"),
+            "is_core": _clean_cell(r.get("is_core")).lower() in ("true", "1", "yes"),
+            "no_off_day": _clean_cell(r.get("no_off_day")).lower() in ("true", "1", "yes"),
+            "pin": pin,
+        })
+    if not recs:
+        return False, "The roster would be empty - nothing was changed."
+
     if db_enabled():
-        _sb_request("employees?id=gt.0", "DELETE", extra_headers={"Prefer": "return=minimal"})
-        recs = []
-        for _, r in df.iterrows():
-            nm = str(r.get("name", "")).strip()
-            if not nm:
-                continue
-            recs.append({
-                "name": nm, "emp_type": str(r.get("type", "full") or "full"),
-                "locations": str(r.get("locations", "") or ""),
-                "is_core": str(r.get("is_core", "")).strip().lower() in ("true", "1", "yes"),
-                "no_off_day": str(r.get("no_off_day", "")).strip().lower() in ("true", "1", "yes"),
-                "pin": str(r.get("pin", "") or "").strip(),
-            })
-        code, text = _sb_request("employees", "POST", body=recs,
-                                 extra_headers={"Prefer": "return=minimal"})
+        # 1) upsert every row first (roster is never empty at any moment)
+        code, text = _sb_request("employees?on_conflict=name", "POST", body=recs,
+                                 extra_headers={"Prefer":
+                                                "resolution=merge-duplicates,return=minimal"})
+        if code not in (200, 201, 204):
+            load_employees.clear()
+            return False, f"{code}: {text}"
+        # 2) only now remove staff the admin actually deleted from the grid
+        keep = ",".join('"' + r["name"].replace('"', '') + '"' for r in recs)
+        _sb_request(f"employees?name=not.in.({keep})", "DELETE",
+                    extra_headers={"Prefer": "return=minimal"})
         load_employees.clear()
-        return code in (200, 201, 204), (None if code in (200, 201, 204) else f"{code}: {text}")
+        try:
+            pd.DataFrame(recs).rename(columns={"emp_type": "type"}).to_csv(EMP_CSV, index=False)
+        except Exception:
+            pass
+        return True, None
     df.to_csv(EMP_CSV, index=False)
     load_employees.clear()
     return True, None

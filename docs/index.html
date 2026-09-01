@@ -169,17 +169,43 @@ var pinEl=document.getElementById('pin');
 function togglePin(){
   pinEl.style.display = (whoSel.value && (PINS[whoSel.value]||'')) ? 'block' : 'none';
 }
+function fillNames(names){
+  names.forEach(function(n){
+    var o=document.createElement('option'); o.value=n; o.textContent=n; whoSel.appendChild(o);
+  });
+  var saved=localStorage.getItem('wd_name');
+  if(saved && names.indexOf(saved)>=0){ whoSel.value=saved; refresh(); }
+  togglePin();
+}
+/* Safety net: if the roster is empty/unreachable, fall back to the names on
+   the schedule so the team can still check in. */
+function namesFromShifts(){
+  var t=mytToday();
+  return GET('shifts?select=employee&work_date=in.('+ydayOf(t)+','+t+')')
+    .then(function(rows){
+      var seen={}, names=[];
+      (rows||[]).forEach(function(r){
+        if(r.employee && !seen[r.employee]){ seen[r.employee]=1; names.push(r.employee); }
+      });
+      names.sort();
+      if(names.length){
+        fillNames(names);
+        say('\u26a0\ufe0f Staff list unavailable \u2014 showing names from today\'s roster. '+
+            'Tell your admin if your name is missing.','late');
+      } else {
+        say('\u26a0\ufe0f Could not load the staff list. Check your connection and reopen the app.','late');
+      }
+    }).catch(function(){
+      say('\u26a0\ufe0f Could not load the staff list. Check your connection and reopen the app.','late');
+    });
+}
 function loadNames(){
-  GET('employees?select=name,pin&order=name').then(function(rows){
+  return GET('employees?select=name,pin&order=name').then(function(rows){
     var names=[];
     (rows||[]).forEach(function(r){ PINS[r.name]=(r.pin||'').trim(); names.push(r.name); });
-    names.forEach(function(n){
-      var o=document.createElement('option'); o.value=n; o.textContent=n; whoSel.appendChild(o);
-    });
-    var saved=localStorage.getItem('wd_name');
-    if(saved && names.indexOf(saved)>=0){ whoSel.value=saved; refresh(); }
-    togglePin();
-  });
+    if(!names.length) return namesFromShifts();
+    fillNames(names);
+  }).catch(function(){ return namesFromShifts(); });
 }
 
 function ydayOf(iso){

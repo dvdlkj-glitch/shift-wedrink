@@ -1,7 +1,7 @@
 /* WeDrink Check-In — service worker.
    Caches the app shell so the icon launches instantly; all Supabase API
    calls go straight to the network (never cached). */
-const CACHE = "wedrink-checkin-v5";
+const CACHE = "wedrink-checkin-v6";
 const SHELL = ["./", "index.html", "manifest.webmanifest", "icon-192.png", "icon-512.png"];
 
 self.addEventListener("install", (e) => {
