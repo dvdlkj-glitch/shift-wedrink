@@ -73,7 +73,7 @@ st.set_page_config(page_title="WeDrink Sabah — Shift Dashboard",
                    page_icon="🧋", layout="wide")
 
 # Build marker — bump when debugging deploys to confirm which code Cloud runs.
-APP_BUILD = "b26-2026-09-01"
+APP_BUILD = "b27-2026-09-02"
 
 DEFAULT_ADMIN_USER = "admin"
 DEFAULT_ADMIN_PW = "wedrink2026"
@@ -232,18 +232,21 @@ def load_schedule():
         if df.empty:                   # empty table — migrate the committed CSV in
             seed = _load_schedule_csv()
             if not seed.empty:
-                db_replace_shifts(seed)
+                db_write_shifts(seed)
                 return seed
         return df
     return _load_schedule_csv()
 
 
-def save_schedule(df):
-    """Persist the whole roster — to Supabase (durable) when configured, else CSV."""
+def save_schedule(df, dates=None):
+    """Persist the schedule. Pass `dates` (the ISO days the admin actually
+    edited) so the write can only touch those days - an unscoped save from a
+    browser tab that has been open for hours would otherwise overwrite newer
+    work. Returns (ok, err)."""
     if db_enabled():
-        db_replace_shifts(df)
-    else:
-        _save_schedule_csv(df)
+        return db_write_shifts(df, dates)
+    _save_schedule_csv(df)
+    return True, None
 
 
 def actual_hours(ci, co):
@@ -610,18 +613,36 @@ def _sb_request(path, method="GET", body=None, extra_headers=None):
         return 0, str(e)
 
 
+def _sb_get_all(path, page=1000):
+    """GET every row of a PostgREST query. A single response is capped at 1000
+    rows, so walk the result with limit/offset. Returns (ok, rows) - ok is
+    False on any transport/HTTP error so callers never mistake a truncated or
+    failed read for the real data. Reading short here once destroyed shifts:
+    the old save path deleted the whole table and wrote back only what it read."""
+    out, start = [], 0
+    while True:
+        sep = "&" if "?" in path else "?"
+        code, text = _sb_request("%s%slimit=%d&offset=%d" % (path, sep, page, start), "GET")
+        if code != 200:
+            return False, out
+        try:
+            rows = json.loads(text)
+        except Exception:
+            return False, out
+        out.extend(rows)
+        if len(rows) < page or start > 100000:
+            return True, out
+        start += page
+
+
 _SHIFT_DB2APP = {"work_date": "date", "emp_type": "type",
                  "start_time": "start", "end_time": "end"}
 
 
 def db_fetch_shifts():
     """All planned shifts from Supabase as a SCHED_COLS DataFrame; None on error."""
-    code, text = _sb_request("shifts?select=*&order=work_date,location,shift", "GET")
-    if code != 200:
-        return None
-    try:
-        rows = json.loads(text)
-    except Exception:
+    ok, rows = _sb_get_all("shifts?select=*&order=work_date,location,shift")
+    if not ok:
         return None
     if not rows:
         return pd.DataFrame(columns=SCHED_COLS)
@@ -633,24 +654,68 @@ def db_fetch_shifts():
     return df[SCHED_COLS].fillna("")
 
 
-def db_replace_shifts(df):
-    """Replace the whole shifts table with df (delete-all then bulk insert)."""
-    _sb_request("shifts?id=gt.0", "DELETE", extra_headers={"Prefer": "return=minimal"})
-    if df is None or df.empty:
-        return
-    recs = []
+def _shift_rec(r):
+    """One schedule row as a shifts-table record."""
+    return {
+        "work_date": str(r["date"]), "day": str(r.get("day", "")),
+        "location": str(r["location"]), "shift": str(r["shift"]),
+        "employee": str(r["employee"]), "emp_type": str(r.get("type", "")),
+        "start_time": str(r.get("start", "")), "end_time": str(r.get("end", "")),
+        "hours": float(pd.to_numeric(r.get("hours", 0), errors="coerce") or 0),
+        "status": str(r.get("status", "")), "note": str(r.get("note", "")),
+    }
+
+
+def db_write_shifts(df, dates=None):
+    """Persist shifts without ever emptying the table. Rows are UPSERTed on
+    (work_date, location, shift, employee); only afterwards are the slots that
+    really disappeared removed, and only inside the days being edited.
+
+    `dates` scopes the whole write to those ISO days, so one admin's save can
+    never reach into another week. This replaces a delete-all-then-reinsert
+    that silently destroyed every shift past the 1000-row read cap - the cause
+    of shifts vanishing after a save and of staff losing their check-in button.
+    Returns (ok, err)."""
+    if df is None:
+        return True, None
+    day_set = None if dates is None else {str(d) for d in dates}
+    recs, seen = [], set()
     for _, r in df.iterrows():
-        recs.append({
-            "work_date": str(r["date"]), "day": str(r.get("day", "")),
-            "location": str(r["location"]), "shift": str(r["shift"]),
-            "employee": str(r["employee"]), "emp_type": str(r.get("type", "")),
-            "start_time": str(r.get("start", "")), "end_time": str(r.get("end", "")),
-            "hours": float(pd.to_numeric(r.get("hours", 0), errors="coerce") or 0),
-            "status": str(r.get("status", "")), "note": str(r.get("note", "")),
-        })
+        emp, diso = str(r.get("employee", "")).strip(), str(r.get("date", "")).strip()
+        if not emp or not diso or (day_set is not None and diso not in day_set):
+            continue
+        key = (diso, str(r["location"]), str(r["shift"]), emp)
+        if key in seen:                       # never post the same slot twice
+            continue
+        seen.add(key)
+        recs.append(_shift_rec(r))
     for i in range(0, len(recs), 200):
-        _sb_request("shifts", "POST", body=recs[i:i + 200],
-                    extra_headers={"Prefer": "return=minimal"})
+        code, text = _sb_request(
+            "shifts?on_conflict=work_date,location,shift,employee", "POST",
+            body=recs[i:i + 200],
+            extra_headers={"Prefer": "resolution=merge-duplicates,return=minimal"})
+        if code not in (200, 201, 204):
+            db_fetch_shifts.clear()
+            return False, "%s: %s" % (code, text)
+    days = sorted(day_set) if day_set is not None else sorted({k[0] for k in seen})
+    for i in range(0, len(days), 40):         # prune removed slots, day-scoped
+        chunk = days[i:i + 40]
+        q = urlencode({"select": "id,work_date,location,shift,employee",
+                       "work_date": "in.(%s)" % ",".join(chunk)})
+        code, text = _sb_request("shifts?%s" % q, "GET")
+        if code != 200:
+            continue
+        try:
+            stale = [str(x["id"]) for x in json.loads(text)
+                     if (str(x["work_date"]), str(x["location"]), str(x["shift"]),
+                         str(x["employee"])) not in seen]
+        except Exception:
+            continue
+        for j in range(0, len(stale), 50):     # 50 < the DB's 80-row mass-delete guard
+            _sb_request("shifts?id=in.(%s)" % ",".join(stale[j:j + 50]), "DELETE",
+                        extra_headers={"Prefer": "return=minimal"})
+    db_fetch_shifts.clear()
+    return True, None
 
 
 @st.cache_data(ttl=10, show_spinner=False)
@@ -2379,7 +2444,10 @@ def render_assign_form():
             df = pd.concat([df, pd.DataFrame([srow])], ignore_index=True)
             msg = "Shift added."
         st.session_state.schedule = df[SCHED_COLS]
-        save_schedule(st.session_state.schedule)
+        ok, err = save_schedule(st.session_state.schedule, dates=[diso])
+        if not ok:
+            st.error(f"Not saved — {err}. Nothing was changed; please try again.")
+            st.stop()
         st.success(f"{msg}  {emp} → {loc_label(loc_key)}, {shift} "
                    f"{start_t.strftime('%H:%M')}-{end_t.strftime('%H:%M')} on {diso}")
         st.rerun()
@@ -2392,7 +2460,10 @@ def render_assign_form():
             cc[0].write(f"• {loc_label(r['location'])} · {r['shift']} · {r['start']}-{r['end']}")
             if cc[1].button("🗑️ Remove", key=f"del_{idx}"):
                 st.session_state.schedule = df.drop(idx).reset_index(drop=True)
-                save_schedule(st.session_state.schedule)
+                ok, err = save_schedule(st.session_state.schedule, dates=[diso])
+                if not ok:
+                    st.error(f"Could not remove that shift — {err}")
+                    st.stop()
                 st.rerun()
 
 
@@ -2643,7 +2714,10 @@ def render_admin():
                 new = pd.DataFrame(rows)[SCHED_COLS] if rows else pd.DataFrame(columns=SCHED_COLS)
                 keep = st.session_state.schedule[~st.session_state.schedule.date.isin(WEEK_ISO)]
                 st.session_state.schedule = pd.concat([keep, new], ignore_index=True)[SCHED_COLS]
-                save_schedule(st.session_state.schedule)
+                ok, err = save_schedule(st.session_state.schedule, dates=WEEK_ISO)
+                if not ok:
+                    st.error(f"Not saved — {err}")
+                    st.stop()
                 st.success(f"Generated {len(new)} shifts for {WEEK_ISO[0]} → {WEEK_ISO[-1]}.")
         with c2:
             prev_iso = [(_ws - timedelta(days=7) + timedelta(days=i)).isoformat() for i in range(7)]
@@ -2663,14 +2737,24 @@ def render_admin():
                         ~st.session_state.schedule.date.isin(WEEK_ISO)]
                     st.session_state.schedule = pd.concat(
                         [keep, src], ignore_index=True)[SCHED_COLS]
-                    save_schedule(st.session_state.schedule)
+                    ok, err = save_schedule(st.session_state.schedule, dates=WEEK_ISO)
+                    if not ok:
+                        st.error(f"Not saved — {err}")
+                        st.stop()
                     st.success(f"Copied {len(src)} shifts into {WEEK_ISO[0]} → {WEEK_ISO[-1]}.")
                     st.rerun()
         with c3:
-            if st.button("🗑️ Clear week", width="stretch"):
+            sure = st.checkbox("confirm", key="clr_sure",
+                               help="Tick, then press Clear week - this deletes every "
+                                    "shift in the week shown and cannot be undone.")
+            if st.button("🗑️ Clear week", width="stretch", disabled=not sure):
                 st.session_state.schedule = st.session_state.schedule[
                     ~st.session_state.schedule.date.isin(WEEK_ISO)].reset_index(drop=True)
-                save_schedule(st.session_state.schedule)
+                ok, err = save_schedule(st.session_state.schedule, dates=WEEK_ISO)
+                if not ok:
+                    st.error(f"Not cleared — {err}")
+                    st.stop()
+                st.session_state.clr_sure = False
                 st.rerun()
         with c4:
             st.download_button("⬇️ Download all CSV",
@@ -2720,6 +2804,14 @@ def render_admin():
                     }, key="sched_editor")
                 other = st.session_state.schedule[~st.session_state.schedule.date.isin(WEEK_ISO)]
                 st.session_state.schedule = pd.concat([other, edited], ignore_index=True)[SCHED_COLS]
+                if st.button("💾 Save table changes", type="primary", key="grid_save"):
+                    ok, err = save_schedule(st.session_state.schedule, dates=WEEK_ISO)
+                    if ok:
+                        st.success(f"Saved {len(edited)} shifts for "
+                                   f"{WEEK_ISO[0]} → {WEEK_ISO[-1]}.")
+                        st.rerun()
+                    else:
+                        st.error(f"Not saved — {err}")
 
     with tab_clock:
         st.subheader("📋 Attendance records")
