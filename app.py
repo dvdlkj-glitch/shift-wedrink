@@ -73,7 +73,7 @@ st.set_page_config(page_title="WeDrink Sabah — Shift Dashboard",
                    page_icon="🧋", layout="wide")
 
 # Build marker — bump when debugging deploys to confirm which code Cloud runs.
-APP_BUILD = "b27-2026-09-02"
+APP_BUILD = "b28-2026-09-02"
 
 DEFAULT_ADMIN_USER = "admin"
 DEFAULT_ADMIN_PW = "wedrink2026"
@@ -695,7 +695,6 @@ def db_write_shifts(df, dates=None):
             body=recs[i:i + 200],
             extra_headers={"Prefer": "resolution=merge-duplicates,return=minimal"})
         if code not in (200, 201, 204):
-            db_fetch_shifts.clear()
             return False, "%s: %s" % (code, text)
     days = sorted(day_set) if day_set is not None else sorted({k[0] for k in seen})
     for i in range(0, len(days), 40):         # prune removed slots, day-scoped
@@ -714,7 +713,6 @@ def db_write_shifts(df, dates=None):
         for j in range(0, len(stale), 50):     # 50 < the DB's 80-row mass-delete guard
             _sb_request("shifts?id=in.(%s)" % ",".join(stale[j:j + 50]), "DELETE",
                         extra_headers={"Prefer": "return=minimal"})
-    db_fetch_shifts.clear()
     return True, None
 
 
